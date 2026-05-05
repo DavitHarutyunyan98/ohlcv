@@ -5,7 +5,7 @@ import CandlestickChart from "./CandlestickChart";
 import OHLCVTable from "./OHLCVTable";
 import PairSearch from "./PairSearch";
 import DateRangePicker from "./DateRangePicker";
-import TopPairsTable from "./TopPairsTable";
+import TopPairsTab from "./TopPairsTab";
 
 export interface Kline {
   openTime: number;
@@ -291,9 +291,7 @@ export default function OHLCVDashboard() {
           )}
 
           {activeTab === "top" && (
-            <TopPairsTable
-              quote="USDT"
-              topN={50}
+            <TopPairsTab
               activePair={symbol}
               onSelectPair={handleSelectPair}
             />
