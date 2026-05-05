@@ -14,7 +14,8 @@
     "react-dom": "^18",
     "lightweight-charts": "^4.1.3",
     "crypto-js": "^4.2.0",
-    "@supabase/supabase-js": "^2"
+    "@supabase/supabase-js": "^2",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^20",

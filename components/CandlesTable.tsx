@@ -3,11 +3,14 @@
 import { useState, useMemo } from "react";
 import Pagination from "./Pagination";
 import type { Kline } from "@/lib/types";
+import { downloadXlsx } from "@/lib/downloadXlsx";
 
 type SortKey = "openTime" | "open" | "high" | "low" | "close" | "volume" | "change";
 
 interface Props {
   klines: Kline[];
+  symbol?: string;
+  interval?: string;
 }
 
 function fmtTime(ms: number) {
@@ -33,7 +36,7 @@ function fmtVol(s: string) {
   return n.toFixed(2);
 }
 
-export default function CandlesTable({ klines }: Props) {
+export default function CandlesTable({ klines, symbol = "data", interval = "" }: Props) {
   const [page, setPage]         = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const [sortKey, setSortKey]   = useState<SortKey>("openTime");
@@ -92,6 +95,23 @@ export default function CandlesTable({ klines }: Props) {
             {klines.length.toLocaleString()} total
           </span>
         </span>
+        <button
+          onClick={() => {
+            const rows = withChange.map((k) => ({
+              Time:     new Date(k.openTime).toLocaleString(),
+              Open:     k.open,
+              High:     k.high,
+              Low:      k.low,
+              Close:    k.close,
+              "Chg %":  k.change.toFixed(4),
+              Volume:   k.volume,
+            }));
+            downloadXlsx(rows, `${symbol}_${interval}_candles`);
+          }}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-binance-border text-binance-text rounded hover:bg-binance-yellow hover:text-binance-dark transition"
+        >
+          📥 Download XLSX
+        </button>
       </div>
 
       <div className="overflow-x-auto">

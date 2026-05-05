@@ -169,27 +169,35 @@ export default function OHLCVDashboard() {
     if (found?.klines) setActiveKlines(found.klines);
   }, [multiResults]);
 
-  // ── Save to Supabase ──────────────────────────────────────────────────────
+  // ── Save to Supabase (batched to avoid body size limits) ─────────────────
   const handleSave = useCallback(async () => {
-    const symbols = mode === "single" ? [symbol] : multiResults.filter((r) => r.status === "ok").map((r) => r.symbol);
-    const candles = mode === "single"
-      ? singleKlines
-      : multiResults.flatMap((r) => r.klines ?? []);
+    const okSymbols = mode === "single"
+      ? [symbol]
+      : multiResults.filter((r) => r.status === "ok").map((r) => r.symbol);
 
-    if (candles.length === 0) return;
+    // Build flat list of {symbol, ...kline} rows
+    const tagged = mode === "single"
+      ? singleKlines.map((k) => ({ ...k, _symbol: symbol }))
+      : multiResults.flatMap((r) =>
+          (r.klines ?? []).map((k) => ({ ...k, _symbol: r.symbol }))
+        );
+
+    if (tagged.length === 0) return;
 
     setSaving(true);
     setSaveMsg(null);
+
+    const CHUNK = 500;
+    let sessionId: string | null = null;
+    let totalSaved = 0;
+
     try {
-      const res  = await fetch("/api/supabase/save", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          mode, symbols, interval: barLength,
-          startDate: startDate || null,
-          endDate:   endDate   || null,
-          candles:   candles.map((k) => ({
-            symbol:     mode === "single" ? symbol : (k as Kline & { _sym?: string })._sym ?? symbol,
+      for (let i = 0; i < tagged.length; i += CHUNK) {
+        const chunk = tagged.slice(i, i + CHUNK);
+
+        const body: Record<string, unknown> = {
+          candles: chunk.map((k) => ({
+            symbol:     k._symbol,
             open_time:  k.openTime,
             open:       k.open,
             high:       k.high,
@@ -198,11 +206,41 @@ export default function OHLCVDashboard() {
             volume:     k.volume,
             close_time: k.closeTime,
           })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      setSaveMsg(`✓ Saved ${data.saved.toLocaleString()} candles (session ${data.sessionId.slice(0, 8)}…)`);
+          interval: barLength,
+        };
+
+        // First chunk creates the session; subsequent chunks append to it
+        if (!sessionId) {
+          body.mode      = mode;
+          body.symbols   = okSymbols;
+          body.startDate = startDate || null;
+          body.endDate   = endDate   || null;
+        } else {
+          body.sessionId = sessionId;
+        }
+
+        const res = await fetch("/api/supabase/save", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify(body),
+        });
+
+        let data: Record<string, unknown>;
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+
+        if (!res.ok) throw new Error((data.error as string) ?? `HTTP ${res.status}`);
+
+        if (!sessionId) sessionId = data.sessionId as string;
+        totalSaved += data.saved as number;
+
+        setSaveMsg(`Saving… ${totalSaved.toLocaleString()} / ${tagged.length.toLocaleString()} candles`);
+      }
+
+      setSaveMsg(`✓ Saved ${totalSaved.toLocaleString()} candles (session ${(sessionId ?? "").slice(0, 8)}…)`);
     } catch (e) {
       setSaveMsg(`✗ ${e instanceof Error ? e.message : "Save failed"}`);
     } finally {
@@ -493,7 +531,7 @@ export default function OHLCVDashboard() {
         )}
 
         {/* Single: candles table */}
-        {mode === "single" && <CandlesTable klines={singleKlines} />}
+        {mode === "single" && <CandlesTable klines={singleKlines} symbol={symbol} interval={barLength} />}
 
         {/* Multi: pairs result table */}
         {mode === "multi" && (multiResults.length > 0 || fetchLoading) && (

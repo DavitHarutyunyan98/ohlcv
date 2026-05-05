@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Pagination from "./Pagination";
 import type { PairResult } from "@/lib/types";
+import { downloadXlsx } from "@/lib/downloadXlsx";
 
 type SortKey = "symbol" | "change" | "periodOpen" | "periodClose" | "periodHigh" | "periodLow" | "totalVolume" | "candles";
 
@@ -108,6 +109,30 @@ export default function PairsResultTable({
               {currentSymbol && <span className="ml-1 text-white font-mono">{currentSymbol}</span>}
             </span>
           </div>
+        )}
+
+        {/* Download */}
+        {results.length > 0 && (
+          <button
+            onClick={() => {
+              const rows = results
+                .filter((r) => r.status === "ok")
+                .map((r) => ({
+                  Symbol:      r.symbol,
+                  Open:        r.periodOpen,
+                  High:        r.periodHigh,
+                  Low:         r.periodLow,
+                  Close:       r.periodClose,
+                  "Change %":  r.change.toFixed(4),
+                  Volume:      r.totalVolume,
+                  Bars:        r.candles,
+                }));
+              downloadXlsx(rows, `pairs_${quote}_results`);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-binance-border text-binance-text rounded hover:bg-binance-yellow hover:text-binance-dark transition"
+          >
+            📥 Download XLSX
+          </button>
         )}
 
         {/* Search */}
