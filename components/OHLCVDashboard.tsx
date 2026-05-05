@@ -84,8 +84,9 @@ export default function OHLCVDashboard() {
 
   // ── Analysis ──────────────────────────────────────────────────────────────
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
-  const [analyzing, setAnalyzing]     = useState(false);
-  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [enrichedBars,   setEnrichedBars]   = useState<EnrichedBar[]>([]);
+  const [analyzing,      setAnalyzing]      = useState(false);
+  const [analyzeError,   setAnalyzeError]   = useState<string | null>(null);
 
   // Probe Supabase once
   useEffect(() => {
@@ -129,6 +130,7 @@ export default function OHLCVDashboard() {
     setFetchLoading(true);
     setFetchError(null);
     setAnalysisResult(null);
+    setEnrichedBars([]);
 
     try {
       if (mode === "single") {
@@ -304,6 +306,7 @@ export default function OHLCVDashboard() {
       if (allBars.length < 30) throw new Error("Not enough bars for analysis (need ≥ 30)");
 
       const result = analyzeEnrichedBars(allBars);
+      setEnrichedBars(allBars);
       setAnalysisResult(result);
     } catch (e) {
       setAnalyzeError(e instanceof Error ? e.message : "Analysis failed");
@@ -686,6 +689,7 @@ export default function OHLCVDashboard() {
         {analysisResult && (
           <AnalysisPanel
             result={analysisResult}
+            bars={enrichedBars}
             symbol={mode === "single" ? symbol : `${multiResults.filter((r) => r.status === "ok").length} pairs`}
             interval={barLength}
           />

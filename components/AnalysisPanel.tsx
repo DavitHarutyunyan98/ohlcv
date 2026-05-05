@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import type { AnalysisResult, FreqRow, CorrRow, FwdHorizon } from "@/lib/types";
+import type { AnalysisResult, FreqRow, CorrRow, FwdHorizon, EnrichedBar } from "@/lib/types";
 import { FWD_HORIZONS } from "@/lib/types";
 import { downloadXlsx } from "@/lib/downloadXlsx";
+import StrategyBuilder from "./StrategyBuilder";
 
 // ─── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -49,15 +50,16 @@ function fmt2(n: number | null): string {
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
-  result:   AnalysisResult;
-  symbol?:  string;
+  result:    AnalysisResult;
+  bars:      EnrichedBar[];
+  symbol?:   string;
   interval?: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function AnalysisPanel({ result, symbol = "", interval = "" }: Props) {
-  const [activeTab,  setActiveTab]  = useState<"freq" | "corr">("freq");
+export default function AnalysisPanel({ result, bars, symbol = "", interval = "" }: Props) {
+  const [activeTab,  setActiveTab]  = useState<"freq" | "corr" | "strategy">("freq");
   const [horizon,    setHorizon]    = useState<FwdHorizon>(1);
   const [sortFreqBy, setSortFreqBy] = useState<"liftUp" | "liftDown" | "count">("liftUp");
   const [filterFeat, setFilterFeat] = useState<string>("");
@@ -155,17 +157,19 @@ export default function AnalysisPanel({ result, symbol = "", interval = "" }: Pr
 
       {/* ── Tabs ───────────────────────────────────────────────────────── */}
       <div className="flex border-b border-binance-border">
-        {(["freq", "corr"] as const).map((t) => (
+        {(["freq", "corr", "strategy"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
             className={`px-5 py-2.5 text-xs font-semibold uppercase tracking-wider transition border-b-2 ${
               activeTab === t
-                ? "border-binance-yellow text-binance-yellow"
+                ? t === "strategy"
+                  ? "border-purple-400 text-purple-400"
+                  : "border-binance-yellow text-binance-yellow"
                 : "border-transparent text-binance-muted hover:text-white"
             }`}
           >
-            {t === "freq" ? "📊 Frequency Table" : "🌡 Correlation Matrix"}
+            {t === "freq" ? "📊 Frequency Table" : t === "corr" ? "🌡 Correlation Matrix" : "🎯 Strategy Builder"}
           </button>
         ))}
       </div>
@@ -352,6 +356,11 @@ export default function AnalysisPanel({ result, symbol = "", interval = "" }: Pr
             <span>Sorted by highest |r| across all horizons.</span>
           </div>
         </div>
+      )}
+
+      {/* ══ STRATEGY BUILDER ═══════════════════════════════════════════════ */}
+      {activeTab === "strategy" && (
+        <StrategyBuilder bars={bars} />
       )}
     </div>
   );
