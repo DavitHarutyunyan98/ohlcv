@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import CandlestickChart from "./CandlestickChart";
 import OHLCVTable from "./OHLCVTable";
 import PairSearch from "./PairSearch";
+import DateRangePicker from "./DateRangePicker";
+import TopPairsTable from "./TopPairsTable";
 
 export interface Kline {
   openTime: number;
@@ -30,32 +32,44 @@ const INTERVALS = [
 
 const LIMITS = [50, 100, 200, 500];
 
+type Tab = "chart" | "table" | "top";
+
 export default function OHLCVDashboard() {
-  const [symbol, setSymbol]     = useState("BTCUSDT");
-  const [interval, setSelectedInterval] = useState("1h");
-  const [limit, setLimit]       = useState(200);
-  const [klines, setKlines]     = useState<Kline[]>([]);
-  const [loading, setLoading]   = useState(false);
-  const [error, setError]       = useState<string | null>(null);
-  const [lastPrice, setLastPrice] = useState<string | null>(null);
-  const [priceChange, setPriceChange] = useState<number>(0);
-  const [activeTab, setActiveTab] = useState<"chart" | "table">("chart");
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [symbol, setSymbol]                   = useState("BTCUSDT");
+  const [interval, setSelectedInterval]       = useState("1h");
+  const [limit, setLimit]                     = useState(200);
+  const [startDate, setStartDate]             = useState("");
+  const [endDate, setEndDate]                 = useState("");
+  const [klines, setKlines]                   = useState<Kline[]>([]);
+  const [loading, setLoading]                 = useState(false);
+  const [error, setError]                     = useState<string | null>(null);
+  const [lastPrice, setLastPrice]             = useState<string | null>(null);
+  const [priceChange, setPriceChange]         = useState<number>(0);
+  const [activeTab, setActiveTab]             = useState<Tab>("chart");
+  const [autoRefresh, setAutoRefresh]         = useState(false);
+
+  const buildUrl = useCallback(() => {
+    const params = new URLSearchParams({
+      symbol,
+      interval,
+      limit: String(limit),
+    });
+    if (startDate) params.set("startTime", String(new Date(startDate).getTime()));
+    if (endDate)   params.set("endTime",   String(new Date(endDate + "T23:59:59").getTime()));
+    return `/api/klines?${params.toString()}`;
+  }, [symbol, interval, limit, startDate, endDate]);
 
   const fetchKlines = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
-      );
+      const res  = await fetch(buildUrl());
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to fetch");
       setKlines(data.klines);
-
       if (data.klines.length >= 2) {
-        const last  = parseFloat(data.klines[data.klines.length - 1].close);
-        const prev  = parseFloat(data.klines[data.klines.length - 2].close);
+        const last = parseFloat(data.klines[data.klines.length - 1].close);
+        const prev = parseFloat(data.klines[data.klines.length - 2].close);
         setLastPrice(last.toFixed(last < 1 ? 6 : 2));
         setPriceChange(((last - prev) / prev) * 100);
       }
@@ -64,22 +78,32 @@ export default function OHLCVDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [symbol, interval, limit]);
+  }, [buildUrl]);
 
-  // Fetch on param change
-  useEffect(() => {
-    fetchKlines();
-  }, [fetchKlines]);
+  useEffect(() => { fetchKlines(); }, [fetchKlines]);
 
-  // Auto-refresh
   useEffect(() => {
     if (!autoRefresh) return;
-    const id = setInterval(fetchKlines, 30_000);
-    return () => clearInterval(id);
+    const id = window.setInterval(fetchKlines, 30_000);
+    return () => window.clearInterval(id);
   }, [autoRefresh, fetchKlines]);
 
-  const last  = klines[klines.length - 1];
-  const isUp  = last ? parseFloat(last.close) >= parseFloat(last.open) : true;
+  // When a pair is selected from TopPairsTable, switch to chart tab
+  const handleSelectPair = (sym: string) => {
+    setSymbol(sym);
+    setActiveTab("chart");
+  };
+
+  const clearDateRange = () => { setStartDate(""); setEndDate(""); };
+
+  const last = klines[klines.length - 1];
+  const isUp = last ? parseFloat(last.close) >= parseFloat(last.open) : true;
+
+  const TABS: { key: Tab; label: string }[] = [
+    { key: "chart", label: "📈 Chart" },
+    { key: "table", label: "📋 Table" },
+    { key: "top",   label: "🏆 Top Pairs" },
+  ];
 
   return (
     <div className="flex flex-col min-h-screen bg-binance-dark text-binance-text">
@@ -101,16 +125,10 @@ export default function OHLCVDashboard() {
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-binance-muted cursor-pointer select-none">
             <div
-              className={`relative w-10 h-5 rounded-full transition-colors ${
-                autoRefresh ? "bg-binance-yellow" : "bg-binance-border"
-              }`}
+              className={`relative w-10 h-5 rounded-full transition-colors ${autoRefresh ? "bg-binance-yellow" : "bg-binance-border"}`}
               onClick={() => setAutoRefresh((v) => !v)}
             >
-              <div
-                className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                  autoRefresh ? "translate-x-5" : ""
-                }`}
-              />
+              <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${autoRefresh ? "translate-x-5" : ""}`} />
             </div>
             Auto-refresh (30s)
           </label>
@@ -134,81 +152,76 @@ export default function OHLCVDashboard() {
         </div>
       </header>
 
-      {/* ── Controls ────────────────────────────────────────── */}
-      <div className="px-6 py-4 border-b border-binance-border bg-binance-card flex flex-wrap items-end gap-4">
-        {/* Pair search */}
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-binance-muted font-medium uppercase tracking-wider">
-            Trading Pair
-          </label>
-          <PairSearch value={symbol} onChange={setSymbol} />
-        </div>
-
-        {/* Interval */}
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-binance-muted font-medium uppercase tracking-wider">
-            Interval
-          </label>
-          <div className="flex gap-1">
-            {INTERVALS.map((i) => (
-              <button
-                key={i.value}
-                onClick={() => setSelectedInterval(i.value)}
-                className={`px-3 py-1.5 text-sm rounded font-medium transition ${
-                  interval === i.value
-                    ? "bg-binance-yellow text-binance-dark"
-                    : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
-                }`}
-              >
-                {i.label}
-              </button>
-            ))}
+      {/* ── Controls (hidden on Top Pairs tab) ─────────────── */}
+      {activeTab !== "top" && (
+        <div className="px-6 py-4 border-b border-binance-border bg-binance-card flex flex-wrap items-end gap-4">
+          {/* Pair */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-binance-muted font-medium uppercase tracking-wider">Trading Pair</label>
+            <PairSearch value={symbol} onChange={setSymbol} />
           </div>
-        </div>
 
-        {/* Limit */}
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-binance-muted font-medium uppercase tracking-wider">
-            Candles
-          </label>
-          <div className="flex gap-1">
-            {LIMITS.map((l) => (
-              <button
-                key={l}
-                onClick={() => setLimit(l)}
-                className={`px-3 py-1.5 text-sm rounded font-medium transition ${
-                  limit === l
-                    ? "bg-binance-yellow text-binance-dark"
-                    : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
-                }`}
-              >
-                {l}
-              </button>
-            ))}
+          {/* Interval */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-binance-muted font-medium uppercase tracking-wider">Interval</label>
+            <div className="flex gap-1">
+              {INTERVALS.map((i) => (
+                <button
+                  key={i.value}
+                  onClick={() => setSelectedInterval(i.value)}
+                  className={`px-3 py-1.5 text-sm rounded font-medium transition ${
+                    interval === i.value
+                      ? "bg-binance-yellow text-binance-dark"
+                      : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
+                  }`}
+                >
+                  {i.label}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {/* Limit */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-binance-muted font-medium uppercase tracking-wider">Candles</label>
+            <div className="flex gap-1">
+              {LIMITS.map((l) => (
+                <button
+                  key={l}
+                  onClick={() => setLimit(l)}
+                  className={`px-3 py-1.5 text-sm rounded font-medium transition ${
+                    limit === l
+                      ? "bg-binance-yellow text-binance-dark"
+                      : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
+                  }`}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Date range */}
+          <DateRangePicker
+            startDate={startDate}
+            endDate={endDate}
+            onStartChange={setStartDate}
+            onEndChange={setEndDate}
+            onClear={clearDateRange}
+          />
         </div>
-      </div>
+      )}
 
       {/* ── Price banner ────────────────────────────────────── */}
-      {lastPrice && (
-        <div className="px-6 py-3 bg-binance-card border-b border-binance-border flex items-center gap-4">
+      {lastPrice && activeTab !== "top" && (
+        <div className="px-6 py-3 bg-binance-card border-b border-binance-border flex flex-wrap items-center gap-4">
           <span className="text-2xl font-bold text-white">
             {symbol.replace(/^(.+?)(USDT|BTC|ETH|BNB|BUSD)$/, "$1 / $2")}
           </span>
-          <span
-            className={`text-2xl font-mono font-bold ${
-              isUp ? "text-binance-green" : "text-binance-red"
-            }`}
-          >
+          <span className={`text-2xl font-mono font-bold ${isUp ? "text-binance-green" : "text-binance-red"}`}>
             ${lastPrice}
           </span>
-          <span
-            className={`text-sm font-semibold px-2 py-0.5 rounded ${
-              priceChange >= 0
-                ? "bg-binance-green/20 text-binance-green"
-                : "bg-binance-red/20 text-binance-red"
-            }`}
-          >
+          <span className={`text-sm font-semibold px-2 py-0.5 rounded ${priceChange >= 0 ? "bg-binance-green/20 text-binance-green" : "bg-binance-red/20 text-binance-red"}`}>
             {priceChange >= 0 ? "▲" : "▼"} {Math.abs(priceChange).toFixed(2)}%
           </span>
           {last && (
@@ -219,6 +232,11 @@ export default function OHLCVDashboard() {
               <span>C: <span className="text-white">{parseFloat(last.close).toLocaleString()}</span></span>
               <span>V: <span className="text-white">{parseFloat(last.volume).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span></span>
             </div>
+          )}
+          {(startDate || endDate) && (
+            <span className="ml-auto text-xs text-binance-yellow border border-binance-yellow/40 rounded px-2 py-0.5">
+              📅 {startDate || "…"} → {endDate || "now"}
+            </span>
           )}
         </div>
       )}
@@ -232,17 +250,17 @@ export default function OHLCVDashboard() {
 
       {/* ── Tabs ────────────────────────────────────────────── */}
       <div className="px-6 pt-4 flex gap-2">
-        {(["chart", "table"] as const).map((tab) => (
+        {TABS.map((tab) => (
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
             className={`px-4 py-2 text-sm font-medium rounded-t transition ${
-              activeTab === tab
+              activeTab === tab.key
                 ? "bg-binance-card text-white border-t border-l border-r border-binance-border"
                 : "text-binance-muted hover:text-white"
             }`}
           >
-            {tab === "chart" ? "📈 Chart" : "📋 Table"}
+            {tab.label}
           </button>
         ))}
       </div>
@@ -250,14 +268,14 @@ export default function OHLCVDashboard() {
       {/* ── Main content ────────────────────────────────────── */}
       <div className="flex-1 px-6 pb-6">
         <div className="bg-binance-card border border-binance-border rounded-b-xl rounded-tr-xl overflow-hidden">
-          {activeTab === "chart" ? (
+          {activeTab === "chart" && (
             <div className="p-4">
               {loading && klines.length === 0 ? (
                 <div className="flex items-center justify-center h-[480px] text-binance-muted">
                   <div className="flex flex-col items-center gap-3">
                     <svg className="animate-spin w-8 h-8 text-binance-yellow" viewBox="0 0 24 24" fill="none">
                       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
-                      <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" className="text-binance-yellow"/>
+                      <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/>
                     </svg>
                     <span>Loading chart data…</span>
                   </div>
@@ -266,15 +284,28 @@ export default function OHLCVDashboard() {
                 <CandlestickChart klines={klines} symbol={symbol} interval={interval} />
               )}
             </div>
-          ) : (
+          )}
+
+          {activeTab === "table" && (
             <OHLCVTable klines={klines} loading={loading} />
+          )}
+
+          {activeTab === "top" && (
+            <TopPairsTable
+              quote="USDT"
+              topN={50}
+              activePair={symbol}
+              onSelectPair={handleSelectPair}
+            />
           )}
         </div>
       </div>
 
       {/* ── Footer ──────────────────────────────────────────── */}
       <footer className="text-center text-xs text-binance-muted pb-4">
-        Data provided by Binance API · {klines.length} candles loaded
+        {activeTab !== "top"
+          ? `Data provided by Binance API · ${klines.length} candles loaded`
+          : "24h market data provided by Binance API"}
       </footer>
     </div>
   );

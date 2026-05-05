@@ -77,13 +77,15 @@ export interface SymbolInfo {
 export async function getKlines(
   symbol: string,
   interval: string,
-  limit = 200
+  limit = 200,
+  startTime?: number,
+  endTime?: number
 ): Promise<Kline[]> {
-  const raw = (await binanceFetch("/api/v3/klines", {
-    symbol,
-    interval,
-    limit,
-  })) as Array<unknown[]>;
+  const params: Record<string, string | number> = { symbol, interval, limit };
+  if (startTime) params.startTime = startTime;
+  if (endTime)   params.endTime   = endTime;
+
+  const raw = (await binanceFetch("/api/v3/klines", params)) as Array<unknown[]>;
 
   return raw.map((k) => ({
     openTime: k[0] as number,
@@ -120,6 +122,44 @@ export async function getSymbols(): Promise<SymbolInfo[]> {
       quoteAsset,
       status,
     }));
+}
+
+export interface Ticker24hr {
+  symbol: string;
+  priceChange: string;
+  priceChangePercent: string;
+  lastPrice: string;
+  highPrice: string;
+  lowPrice: string;
+  volume: string;
+  quoteVolume: string;
+  count: number;
+}
+
+/**
+ * Fetch top N pairs by 24h quote volume.
+ * Docs: GET /api/v3/ticker/24hr
+ */
+export async function getTopPairs(
+  quoteAsset = "USDT",
+  topN = 50
+): Promise<Ticker24hr[]> {
+  const data = (await binanceFetch("/api/v3/ticker/24hr")) as Array<{
+    symbol: string;
+    priceChange: string;
+    priceChangePercent: string;
+    lastPrice: string;
+    highPrice: string;
+    lowPrice: string;
+    volume: string;
+    quoteVolume: string;
+    count: number;
+  }>;
+
+  return data
+    .filter((t) => t.symbol.endsWith(quoteAsset))
+    .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
+    .slice(0, topN);
 }
 
 /**

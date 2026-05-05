@@ -11,31 +11,24 @@ const VALID_INTERVALS = [
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
-  const symbol = searchParams.get("symbol")?.toUpperCase();
-  const interval = searchParams.get("interval") ?? "1h";
-  const limit = Math.min(
-    parseInt(searchParams.get("limit") ?? "200", 10),
-    1000
-  );
+  const symbol    = searchParams.get("symbol")?.toUpperCase();
+  const interval  = searchParams.get("interval") ?? "1h";
+  const limit     = Math.min(parseInt(searchParams.get("limit") ?? "200", 10), 1000);
+  const startTime = searchParams.get("startTime") ? parseInt(searchParams.get("startTime")!, 10) : undefined;
+  const endTime   = searchParams.get("endTime")   ? parseInt(searchParams.get("endTime")!,   10) : undefined;
 
   if (!symbol) {
-    return NextResponse.json(
-      { error: "Missing required parameter: symbol" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Missing required parameter: symbol" }, { status: 400 });
   }
-
   if (!VALID_INTERVALS.includes(interval)) {
     return NextResponse.json(
-      {
-        error: `Invalid interval. Must be one of: ${VALID_INTERVALS.join(", ")}`,
-      },
+      { error: `Invalid interval. Must be one of: ${VALID_INTERVALS.join(", ")}` },
       { status: 400 }
     );
   }
 
   try {
-    const klines = await getKlines(symbol, interval, limit);
+    const klines = await getKlines(symbol, interval, limit, startTime, endTime);
     return NextResponse.json({ symbol, interval, limit, klines });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
