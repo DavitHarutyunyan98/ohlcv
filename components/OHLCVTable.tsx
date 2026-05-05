@@ -1,6 +1,6 @@
 "use client";
 
-import type { Kline } from "./OHLCVDashboard";
+import type { Kline } from "@/lib/types";
 
 interface Props {
   klines: Kline[];
