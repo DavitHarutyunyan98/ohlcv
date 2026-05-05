@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { Kline } from "./OHLCVDashboard";
+import type { Kline } from "@/lib/types";
 
 interface Props {
   klines: Kline[];
