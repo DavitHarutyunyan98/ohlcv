@@ -283,12 +283,12 @@ export function computeIndicators(
       if (futIdx >= n) continue;
       const cf  = bars[futIdx].close;
       const pct = ((cf - c0) / c0) * 100;
-      (bars[i] as Record<string, unknown>)[fwdKey as string] = pct;
+      (bars[i] as unknown as Record<string, unknown>)[fwdKey as string] = pct;
 
       if (atrVal && c0 > 0) {
         const atrPctVal = (atrVal / c0) * 100;
         const threshold = fwdAtrMultiplier * atrPctVal;
-        (bars[i] as Record<string, unknown>)[labelKey as string] =
+        (bars[i] as unknown as Record<string, unknown>)[labelKey as string] =
           pct >=  threshold ? "up"   :
           pct <= -threshold ? "down" : "neutral";
       }
