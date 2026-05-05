@@ -129,7 +129,7 @@ export async function getSymbols(): Promise<SymbolInfo[]> {
 export async function getTicker(
   symbol?: string
 ): Promise<{ symbol: string; price: string }[]> {
-  const params = symbol ? { symbol } : {};
+  const params: Record<string, string | number> = symbol ? { symbol } : {};
   const data = await binanceFetch("/api/v3/ticker/price", params);
   return Array.isArray(data) ? data : [data as { symbol: string; price: string }];
 }
