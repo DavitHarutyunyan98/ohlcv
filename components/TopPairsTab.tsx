@@ -34,7 +34,7 @@ interface PairResult {
   error?: string;
 }
 
-type ResultSortKey = "symbol" | "change" | "periodClose" | "totalVolume" | "candles" | "periodHigh" | "periodLow";
+type ResultSortKey = "symbol" | "change" | "periodOpen" | "periodClose" | "totalVolume" | "candles" | "periodHigh" | "periodLow";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
