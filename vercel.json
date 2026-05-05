@@ -1,9 +1,5 @@
 {
   "framework": "nextjs",
   "buildCommand": "npm run build",
-  "installCommand": "npm install",
-  "env": {
-    "BINANCE_API_KEY": "@binance_api_key",
-    "BINANCE_API_SECRET": "@binance_api_secret"
-  }
+  "installCommand": "npm install"
 }
