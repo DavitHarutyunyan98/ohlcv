@@ -59,6 +59,8 @@ export interface Kline {
   closeTime: number;
   quoteVolume: string;
   trades: number;
+  takerBuyVolume: string;
+  takerBuyQuoteVolume: string;
 }
 
 export interface SymbolInfo {
@@ -88,15 +90,17 @@ export async function getKlines(
   const raw = (await binanceFetch("/api/v3/klines", params)) as Array<unknown[]>;
 
   return raw.map((k) => ({
-    openTime: k[0] as number,
-    open: k[1] as string,
-    high: k[2] as string,
-    low: k[3] as string,
-    close: k[4] as string,
-    volume: k[5] as string,
+    openTime:  k[0] as number,
+    open:      k[1] as string,
+    high:      k[2] as string,
+    low:       k[3] as string,
+    close:     k[4] as string,
+    volume:    k[5] as string,
     closeTime: k[6] as number,
     quoteVolume: k[7] as string,
-    trades: k[8] as number,
+    trades:    k[8] as number,
+    takerBuyVolume:      k[9]  as string,
+    takerBuyQuoteVolume: k[10] as string,
   }));
 }
 
