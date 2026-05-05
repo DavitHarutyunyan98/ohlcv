@@ -32,7 +32,7 @@ const LIMITS = [50, 100, 200, 500];
 
 export default function OHLCVDashboard() {
   const [symbol, setSymbol]     = useState("BTCUSDT");
-  const [interval, setInterval] = useState("1h");
+  const [interval, setSelectedInterval] = useState("1h");
   const [limit, setLimit]       = useState(200);
   const [klines, setKlines]     = useState<Kline[]>([]);
   const [loading, setLoading]   = useState(false);
@@ -153,7 +153,7 @@ export default function OHLCVDashboard() {
             {INTERVALS.map((i) => (
               <button
                 key={i.value}
-                onClick={() => setInterval(i.value)}
+                onClick={() => setSelectedInterval(i.value)}
                 className={`px-3 py-1.5 text-sm rounded font-medium transition ${
                   interval === i.value
                     ? "bg-binance-yellow text-binance-dark"
