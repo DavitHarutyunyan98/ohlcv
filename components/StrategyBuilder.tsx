@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import type { EnrichedBar } from "@/lib/types";
 import { FEATURES } from "@/lib/analysis";
 import {
@@ -136,12 +136,13 @@ function Stat({ label, value, color = "text-white", sub }:
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
-  bars: EnrichedBar[];
+  bars:           EnrichedBar[];
+  initialParams?: BacktestParams;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StrategyBuilder({ bars }: Props) {
+export default function StrategyBuilder({ bars, initialParams }: Props) {
   // ── Conditions ────────────────────────────────────────────────────────────
   const [conditions, setConditions] = useState<Condition[]>([
     { feature: "rsi14",        buckets: [1] },
@@ -155,6 +156,18 @@ export default function StrategyBuilder({ bars }: Props) {
   const [slAtr,    setSlAtr]    = useState(1.0);
   const [maxHold,  setMaxHold]  = useState(20);
   const [cooldown, setCooldown] = useState(5);
+
+  // ── Apply initialParams when loaded from Optimizer ───────────────────────
+  useEffect(() => {
+    if (!initialParams) return;
+    setConditions(initialParams.conditions);
+    setSide(initialParams.side);
+    setTpAtr(initialParams.tpAtr);
+    setSlAtr(initialParams.slAtr);
+    setMaxHold(initialParams.maxHold);
+    setCooldown(initialParams.cooldown);
+    setResult(null);
+  }, [initialParams]);
 
   // ── Results ───────────────────────────────────────────────────────────────
   const [result, setResult] = useState<BacktestResult | null>(null);

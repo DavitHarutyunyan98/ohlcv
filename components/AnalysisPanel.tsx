@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import type { AnalysisResult, FreqRow, CorrRow, FwdHorizon, EnrichedBar } from "@/lib/types";
 import { FWD_HORIZONS } from "@/lib/types";
 import { downloadXlsx } from "@/lib/downloadXlsx";
+import type { BacktestParams } from "@/lib/backtest";
 import StrategyBuilder from "./StrategyBuilder";
+import Optimizer from "./Optimizer";
 
 // ─── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -59,8 +61,15 @@ interface Props {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function AnalysisPanel({ result, bars, symbol = "", interval = "" }: Props) {
-  const [activeTab,  setActiveTab]  = useState<"freq" | "corr" | "strategy">("freq");
-  const [horizon,    setHorizon]    = useState<FwdHorizon>(1);
+  const [activeTab,       setActiveTab]       = useState<"freq" | "corr" | "strategy" | "optimize">("freq");
+  const [builderParams,   setBuilderParams]   = useState<BacktestParams | undefined>(undefined);
+  const [horizon,         setHorizon]         = useState<FwdHorizon>(1);
+
+  // Called by Optimizer → switches to Strategy Builder tab with winning params pre-loaded
+  const handleLoadToBuilder = useCallback((params: BacktestParams) => {
+    setBuilderParams(params);
+    setActiveTab("strategy");
+  }, []);
   const [sortFreqBy, setSortFreqBy] = useState<"liftUp" | "liftDown" | "count">("liftUp");
   const [filterFeat, setFilterFeat] = useState<string>("");
 
@@ -156,20 +165,23 @@ export default function AnalysisPanel({ result, bars, symbol = "", interval = ""
       </div>
 
       {/* ── Tabs ───────────────────────────────────────────────────────── */}
-      <div className="flex border-b border-binance-border">
-        {(["freq", "corr", "strategy"] as const).map((t) => (
+      <div className="flex border-b border-binance-border overflow-x-auto">
+        {(["freq", "corr", "strategy", "optimize"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
-            className={`px-5 py-2.5 text-xs font-semibold uppercase tracking-wider transition border-b-2 ${
+            className={`px-5 py-2.5 text-xs font-semibold uppercase tracking-wider transition border-b-2 whitespace-nowrap ${
               activeTab === t
-                ? t === "strategy"
-                  ? "border-purple-400 text-purple-400"
-                  : "border-binance-yellow text-binance-yellow"
+                ? t === "strategy"  ? "border-purple-400   text-purple-400"
+                : t === "optimize"  ? "border-orange-400   text-orange-400"
+                :                    "border-binance-yellow text-binance-yellow"
                 : "border-transparent text-binance-muted hover:text-white"
             }`}
           >
-            {t === "freq" ? "📊 Frequency Table" : t === "corr" ? "🌡 Correlation Matrix" : "🎯 Strategy Builder"}
+            {t === "freq"     ? "📊 Frequency Table"
+           : t === "corr"     ? "🌡 Correlation Matrix"
+           : t === "strategy" ? "🎯 Strategy Builder"
+           :                    "⚡ Optimize"}
           </button>
         ))}
       </div>
@@ -360,7 +372,12 @@ export default function AnalysisPanel({ result, bars, symbol = "", interval = ""
 
       {/* ══ STRATEGY BUILDER ═══════════════════════════════════════════════ */}
       {activeTab === "strategy" && (
-        <StrategyBuilder bars={bars} />
+        <StrategyBuilder bars={bars} initialParams={builderParams} />
+      )}
+
+      {/* ══ OPTIMIZER ══════════════════════════════════════════════════════ */}
+      {activeTab === "optimize" && (
+        <Optimizer bars={bars} onLoadToBuilder={handleLoadToBuilder} />
       )}
     </div>
   );
