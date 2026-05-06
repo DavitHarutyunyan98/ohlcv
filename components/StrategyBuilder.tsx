@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import type { EnrichedBar } from "@/lib/types";
+import { useState, useCallback, useEffect, useMemo } from "react";
+import type { EnrichedBar, Kline } from "@/lib/types";
 import { FEATURES } from "@/lib/analysis";
 import {
   runBacktest,
@@ -10,9 +10,11 @@ import {
   type BacktestResult,
   type Condition,
   type Trade,
+  type ExitMode,
 } from "@/lib/backtest";
 import { downloadXlsx } from "@/lib/downloadXlsx";
 import * as Strategies from "@/lib/strategies";
+import TradesChart from "./TradesChart";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -48,10 +50,8 @@ function EquityCurve({ curve }: { curve: { time: number; equity: number }[] }) {
   const toY = (e: number)            => PAD.top  + ((maxE - e) / range) * iH;
   const zeroY = toY(0);
 
-  // Build path
   const pts = curve.map((p, i) => `${toX(null, i)},${toY(p.equity)}`).join(" ");
 
-  // Drawdown fill (running max vs current)
   let peak = 0;
   const ddPts: string[] = [];
   curve.forEach((p, i) => {
@@ -61,60 +61,27 @@ function EquityCurve({ curve }: { curve: { time: number; equity: number }[] }) {
   const ddPath = `M ${toX(null, 0)},${toY(Math.max(0, curve[0].equity))} ` +
     ddPts.join(" L ") + ` L ${toX(null, curve.length - 1)},${zeroY} Z`;
 
-  // Y-axis ticks
   const ticks = 4;
-  const yTicks = Array.from({ length: ticks + 1 }, (_, i) =>
-    minE + (i / ticks) * range
-  );
+  const yTicks = Array.from({ length: ticks + 1 }, (_, i) => minE + (i / ticks) * range);
 
   const lastEq = curve[curve.length - 1].equity;
   const isPos  = lastEq >= 0;
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 160 }}>
-      {/* Grid */}
       {yTicks.map((v, i) => (
         <g key={i}>
-          <line x1={PAD.left} y1={toY(v)} x2={W - PAD.right} y2={toY(v)}
-            stroke="#2d3748" strokeWidth="1" />
-          <text x={PAD.left - 4} y={toY(v) + 4}
-            textAnchor="end" fontSize="9" fill="#6b7280">
+          <line x1={PAD.left} y1={toY(v)} x2={W - PAD.right} y2={toY(v)} stroke="#2d3748" strokeWidth="1" />
+          <text x={PAD.left - 4} y={toY(v) + 4} textAnchor="end" fontSize="9" fill="#6b7280">
             {v >= 0 ? "+" : ""}{v.toFixed(1)}%
           </text>
         </g>
       ))}
-
-      {/* Zero line */}
-      <line x1={PAD.left} y1={zeroY} x2={W - PAD.right} y2={zeroY}
-        stroke="#4b5563" strokeWidth="1.5" strokeDasharray="4,3" />
-
-      {/* Drawdown fill */}
+      <line x1={PAD.left} y1={zeroY} x2={W - PAD.right} y2={zeroY} stroke="#4b5563" strokeWidth="1.5" strokeDasharray="4,3" />
       <path d={ddPath} fill="rgba(239,68,68,0.12)" />
-
-      {/* Equity line */}
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={isPos ? "#22c55e" : "#ef4444"}
-        strokeWidth="1.8"
-        strokeLinejoin="round"
-      />
-
-      {/* Final value dot */}
-      <circle
-        cx={toX(null, curve.length - 1)}
-        cy={toY(lastEq)}
-        r="3.5"
-        fill={isPos ? "#22c55e" : "#ef4444"}
-      />
-      <text
-        x={toX(null, curve.length - 1) - 5}
-        y={toY(lastEq) - 7}
-        textAnchor="end"
-        fontSize="10"
-        fontWeight="bold"
-        fill={isPos ? "#22c55e" : "#ef4444"}
-      >
+      <polyline points={pts} fill="none" stroke={isPos ? "#22c55e" : "#ef4444"} strokeWidth="1.8" strokeLinejoin="round" />
+      <circle cx={toX(null, curve.length - 1)} cy={toY(lastEq)} r="3.5" fill={isPos ? "#22c55e" : "#ef4444"} />
+      <text x={toX(null, curve.length - 1) - 5} y={toY(lastEq) - 7} textAnchor="end" fontSize="10" fontWeight="bold" fill={isPos ? "#22c55e" : "#ef4444"}>
         {isPos ? "+" : ""}{lastEq.toFixed(2)}%
       </text>
     </svg>
@@ -134,7 +101,95 @@ function Stat({ label, value, color = "text-white", sub }:
   );
 }
 
-// ─── Save modal ────────────────────────────────────────────────────────────────
+// ─── Reusable condition builder for one of the three sets ─────────────────────
+
+function ConditionEditor({ title, color, conditions, setConditions }: {
+  title:         string;
+  color:         "green" | "red" | "yellow";
+  conditions:    Condition[];
+  setConditions: (next: Condition[]) => void;
+}) {
+  const colorMap = {
+    green:  { text: "text-binance-green", chip: "bg-binance-green text-white", border: "border-binance-green/40" },
+    red:    { text: "text-binance-red",   chip: "bg-binance-red text-white",   border: "border-binance-red/40" },
+    yellow: { text: "text-binance-yellow",chip: "bg-binance-yellow text-binance-dark", border: "border-binance-yellow/40" },
+  } as const;
+  const c = colorMap[color];
+
+  const addCondition = () => {
+    const used = new Set(conditions.map((cond) => cond.feature));
+    const next = FEATURE_OPTIONS.find((f) => !used.has(f.value));
+    if (next) setConditions([...conditions, { feature: next.value, buckets: [color === "red" ? 5 : 1] }]);
+  };
+
+  const removeCondition = (i: number) =>
+    setConditions(conditions.filter((_, idx) => idx !== i));
+
+  const updateFeature = (i: number, feature: string) =>
+    setConditions(conditions.map((cond, idx) => idx === i ? { ...cond, feature } : cond));
+
+  const toggleBucket = (i: number, b: 1 | 2 | 3 | 4 | 5) =>
+    setConditions(conditions.map((cond, idx) => {
+      if (idx !== i) return cond;
+      const has = cond.buckets.includes(b);
+      const next = has ? cond.buckets.filter((x) => x !== b) : [...cond.buckets, b].sort() as typeof cond.buckets;
+      return { ...cond, buckets: next.length > 0 ? next : [b] };
+    }));
+
+  return (
+    <div className={`border ${c.border} bg-binance-dark/60 rounded-lg p-2.5`}>
+      <div className="flex items-center justify-between mb-2">
+        <span className={`text-xs font-bold uppercase tracking-wider ${c.text}`}>{title}</span>
+        <button
+          onClick={addCondition}
+          disabled={conditions.length >= FEATURE_OPTIONS.length}
+          className="text-[10px] px-2 py-0.5 rounded bg-binance-border text-binance-text hover:bg-binance-yellow hover:text-binance-dark disabled:opacity-40 transition"
+        >+ Add</button>
+      </div>
+
+      {conditions.length === 0 ? (
+        <p className="text-[11px] text-binance-muted italic px-1 py-1.5">No conditions — this signal will never fire.</p>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {conditions.map((cond, i) => (
+            <div key={i} className="bg-binance-card border border-binance-border rounded p-2 flex flex-col gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={cond.feature}
+                  onChange={(e) => updateFeature(i, e.target.value)}
+                  className="flex-1 text-[11px] bg-binance-border text-white rounded px-1.5 py-1 outline-none"
+                >
+                  {FEATURE_OPTIONS.map((f) => (
+                    <option key={f.value} value={f.value}>{f.label}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => removeCondition(i)}
+                  className="text-binance-muted hover:text-binance-red text-sm transition"
+                  title="Remove"
+                >✕</button>
+              </div>
+              <div className="flex gap-1 flex-wrap">
+                {([1, 2, 3, 4, 5] as const).map((b) => (
+                  <button
+                    key={b}
+                    onClick={() => toggleBucket(i, b)}
+                    title={BUCKET_LABELS[b]}
+                    className={`px-1.5 py-0.5 text-[10px] rounded font-semibold transition ${
+                      cond.buckets.includes(b) ? c.chip : "bg-binance-border text-binance-muted hover:text-white"
+                    }`}
+                  >Q{b}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Save modal ───────────────────────────────────────────────────────────────
 
 function SaveStrategyModal({ defaultName, defaultDesc, onClose, onConfirm }: {
   defaultName: string;
@@ -163,11 +218,8 @@ function SaveStrategyModal({ defaultName, defaultDesc, onClose, onConfirm }: {
 
         <div className="flex gap-2 justify-end">
           <button onClick={onClose} className="px-3 py-1.5 text-xs rounded bg-binance-border text-binance-text hover:bg-[#414d5c] transition">Cancel</button>
-          <button
-            onClick={() => onConfirm(name.trim() || defaultName, desc.trim())}
-            disabled={!name.trim()}
-            className="px-4 py-1.5 text-xs font-bold rounded bg-binance-yellow text-binance-dark hover:brightness-110 disabled:opacity-40 transition"
-          >
+          <button onClick={() => onConfirm(name.trim() || defaultName, desc.trim())} disabled={!name.trim()}
+            className="px-4 py-1.5 text-xs font-bold rounded bg-binance-yellow text-binance-dark hover:brightness-110 disabled:opacity-40 transition">
             Save
           </button>
         </div>
@@ -180,106 +232,96 @@ function SaveStrategyModal({ defaultName, defaultDesc, onClose, onConfirm }: {
 
 interface Props {
   bars:           EnrichedBar[];
+  /** Raw klines for chart drawing — optional but enables Trades-chart tab. */
+  klines?:        Kline[];
   initialParams?: BacktestParams;
   symbol?:        string;
   interval?:      string;
-  /** Called after a successful save so the parent can refresh the strategies tab. */
   onSaved?:       (id: string) => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StrategyBuilder({ bars, initialParams, symbol = "", interval = "", onSaved }: Props) {
-  // ── Conditions ────────────────────────────────────────────────────────────
-  const [conditions, setConditions] = useState<Condition[]>([
+export default function StrategyBuilder({ bars, klines = [], initialParams, symbol = "", interval = "", onSaved }: Props) {
+  // ── Conditions (3 sets) ───────────────────────────────────────────────────
+  const [bullConditions, setBullConditions] = useState<Condition[]>([
     { feature: "rsi14",        buckets: [1] },
     { feature: "distEma20Atr", buckets: [1] },
-    { feature: "cvdRatio",     buckets: [1] },
   ]);
+  const [bearConditions, setBearConditions] = useState<Condition[]>([
+    { feature: "rsi14",        buckets: [5] },
+    { feature: "distEma20Atr", buckets: [5] },
+  ]);
+  const [exitConditions, setExitConditions] = useState<Condition[]>([]);
 
-  // ── Exit params ───────────────────────────────────────────────────────────
-  const [side,     setSide]     = useState<BacktestParams["side"]>("long");
-  const [tpAtr,    setTpAtr]    = useState(1.5);
-  const [slAtr,    setSlAtr]    = useState(1.0);
-  const [maxHold,  setMaxHold]  = useState(20);
-  const [cooldown, setCooldown] = useState(5);
+  // ── Mode + side ───────────────────────────────────────────────────────────
+  const [exitMode,     setExitMode]     = useState<ExitMode>("signal-flip");
+  const [side,         setSide]         = useState<BacktestParams["side"]>("long");
+  const [flipOnSignal, setFlipOnSignal] = useState(false);
+  const [cooldown,     setCooldown]     = useState(3);
 
-  // ── Apply initialParams when loaded from Optimizer ───────────────────────
+  // ── Apply initialParams when loaded from Optimizer / Strategies ──────────
   useEffect(() => {
     if (!initialParams) return;
-    setConditions(initialParams.conditions);
+    setBullConditions(initialParams.bullConditions);
+    setBearConditions(initialParams.bearConditions);
+    setExitConditions(initialParams.exitConditions);
+    setExitMode(initialParams.exitMode);
     setSide(initialParams.side);
-    setTpAtr(initialParams.tpAtr);
-    setSlAtr(initialParams.slAtr);
-    setMaxHold(initialParams.maxHold);
+    setFlipOnSignal(initialParams.flipOnSignal);
     setCooldown(initialParams.cooldown);
     setResult(null);
   }, [initialParams]);
 
   // ── Results ───────────────────────────────────────────────────────────────
-  const [result, setResult] = useState<BacktestResult | null>(null);
-  const [running, setRunning] = useState(false);
-  const [tradeTab, setTradeTab] = useState<"stats" | "log">("stats");
+  const [result,    setResult]    = useState<BacktestResult | null>(null);
+  const [running,   setRunning]   = useState(false);
+  const [tradeTab,  setTradeTab]  = useState<"stats" | "log" | "chart">("stats");
   const [tradePage, setTradePage] = useState(1);
   const TRADE_PAGE_SIZE = 50;
 
   // Save modal & toast
-  const [showSave, setShowSave] = useState(false);
+  const [showSave,   setShowSave]   = useState(false);
   const [savedToast, setSavedToast] = useState<string | null>(null);
-
-  // ── Condition helpers ─────────────────────────────────────────────────────
-  const addCondition = () => {
-    const used = new Set(conditions.map((c) => c.feature));
-    const next = FEATURE_OPTIONS.find((f) => !used.has(f.value));
-    if (next) setConditions((prev) => [...prev, { feature: next.value, buckets: [1] }]);
-  };
-
-  const removeCondition = (i: number) =>
-    setConditions((prev) => prev.filter((_, idx) => idx !== i));
-
-  const updateFeature = (i: number, feature: string) =>
-    setConditions((prev) => prev.map((c, idx) => idx === i ? { ...c, feature } : c));
-
-  const toggleBucket = (i: number, b: 1 | 2 | 3 | 4 | 5) =>
-    setConditions((prev) => prev.map((c, idx) => {
-      if (idx !== i) return c;
-      const has = c.buckets.includes(b);
-      const next = has ? c.buckets.filter((x) => x !== b) : [...c.buckets, b].sort() as typeof c.buckets;
-      return { ...c, buckets: next.length > 0 ? next : [b] };
-    }));
 
   // ── Load preset ───────────────────────────────────────────────────────────
   const loadPreset = (idx: number) => {
     const p = PRESETS[idx].params;
-    setConditions(p.conditions.map((c) => ({ ...c })));
+    setBullConditions(p.bullConditions.map((c) => ({ ...c, buckets: [...c.buckets] })));
+    setBearConditions(p.bearConditions.map((c) => ({ ...c, buckets: [...c.buckets] })));
+    setExitConditions(p.exitConditions.map((c) => ({ ...c, buckets: [...c.buckets] })));
+    setExitMode(p.exitMode);
     setSide(p.side);
-    setTpAtr(p.tpAtr);
-    setSlAtr(p.slAtr);
-    setMaxHold(p.maxHold);
+    setFlipOnSignal(p.flipOnSignal);
     setCooldown(p.cooldown);
     setResult(null);
   };
 
   // ── Run backtest ──────────────────────────────────────────────────────────
   const handleRun = useCallback(() => {
-    if (bars.length === 0 || conditions.length === 0) return;
+    if (bars.length === 0) return;
     setRunning(true);
     setResult(null);
-    // Defer to next frame so UI can update
     setTimeout(() => {
       try {
-        const r = runBacktest(bars, { conditions, side, tpAtr, slAtr, maxHold, cooldown });
+        const r = runBacktest(bars, {
+          bullConditions, bearConditions, exitMode, exitConditions,
+          side, flipOnSignal, cooldown,
+        });
         setResult(r);
         setTradePage(1);
       } finally {
         setRunning(false);
       }
     }, 16);
-  }, [bars, conditions, side, tpAtr, slAtr, maxHold, cooldown]);
+  }, [bars, bullConditions, bearConditions, exitMode, exitConditions, side, flipOnSignal, cooldown]);
 
   // ── Save current strategy ─────────────────────────────────────────────────
   const handleSaveStrategy = useCallback((name: string, description: string) => {
-    const params: BacktestParams = { conditions, side, tpAtr, slAtr, maxHold, cooldown };
+    const params: BacktestParams = {
+      bullConditions, bearConditions, exitMode, exitConditions,
+      side, flipOnSignal, cooldown,
+    };
     const s = Strategies.saveNew({
       name,
       description,
@@ -293,22 +335,22 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
     setSavedToast(`Saved "${s.name}" ✓`);
     setTimeout(() => setSavedToast(null), 2500);
     onSaved?.(s.id);
-  }, [conditions, side, tpAtr, slAtr, maxHold, cooldown, result, symbol, interval, onSaved]);
+  }, [bullConditions, bearConditions, exitMode, exitConditions, side, flipOnSignal, cooldown, result, symbol, interval, onSaved]);
 
   // ── Export trades ─────────────────────────────────────────────────────────
   const handleExport = () => {
     if (!result) return;
     const rows = result.trades.map((t, i) => ({
-      "#":         i + 1,
-      Symbol:      t.symbol,
-      Side:        t.side,
-      "Entry Time": new Date(t.entryTime).toLocaleString(),
-      "Entry Price": t.entryPrice.toFixed(6),
-      "Exit Time":  new Date(t.exitTime).toLocaleString(),
-      "Exit Price": t.exitPrice.toFixed(6),
-      "P&L %":     t.pnlPct.toFixed(4),
-      "Exit Reason": t.exitReason,
-      "Hold (bars)": t.durationBars,
+      "#":            i + 1,
+      Symbol:         t.symbol,
+      Side:           t.side,
+      "Entry Time":   new Date(t.entryTime).toLocaleString(),
+      "Entry Price":  t.entryPrice.toFixed(6),
+      "Exit Time":    new Date(t.exitTime).toLocaleString(),
+      "Exit Price":   t.exitPrice.toFixed(6),
+      "P&L %":        t.pnlPct.toFixed(4),
+      "Exit Reason":  t.exitReason,
+      "Hold (bars)":  t.durationBars,
     }));
     downloadXlsx(rows, "backtest_trades");
   };
@@ -317,15 +359,43 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
   const trades     = result?.trades ?? [];
   const totalPages = Math.max(1, Math.ceil(trades.length / TRADE_PAGE_SIZE));
   const tradeSlice = trades.slice((tradePage - 1) * TRADE_PAGE_SIZE, tradePage * TRADE_PAGE_SIZE);
+  const s          = result?.stats;
 
-  // ── Stats convenience ─────────────────────────────────────────────────────
-  const s = result?.stats;
+  // For the chart tab — pick a focus symbol
+  const symbolsInTrades = useMemo(() => {
+    const set = new Set(trades.map((t) => t.symbol));
+    return [...set];
+  }, [trades]);
+  const [chartSymbol, setChartSymbol] = useState<string>("");
+  useEffect(() => {
+    if (symbolsInTrades.length === 0) { setChartSymbol(""); return; }
+    if (!symbolsInTrades.includes(chartSymbol)) {
+      // Default to most-traded symbol
+      const counts = new Map<string, number>();
+      for (const t of trades) counts.set(t.symbol, (counts.get(t.symbol) ?? 0) + 1);
+      const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      setChartSymbol(best);
+    }
+  }, [symbolsInTrades, trades, chartSymbol]);
+
+  // Filter trades + klines for the chart by chosen symbol
+  const chartTrades = useMemo(() => trades.filter((t) => !chartSymbol || t.symbol === chartSymbol), [trades, chartSymbol]);
+  const chartKlines = useMemo(() => {
+    // klines passed in are usually for one symbol (single mode). In multi mode
+    // they may be empty; the parent passes whichever klines are available.
+    if (klines.length === 0) return [];
+    if (!chartSymbol || !symbol || chartSymbol === symbol) return klines;
+    // chart is for a different symbol than the loaded klines — disable chart
+    return [];
+  }, [klines, chartSymbol, symbol]);
+
+  const showFlipToggle = side === "both" && exitMode === "signal-flip";
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-0">
 
-      {/* ── Preset bar ────────────────────────────────────────────────── */}
+      {/* Preset bar */}
       <div className="px-4 py-3 border-b border-binance-border bg-binance-dark/40">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-binance-muted font-medium uppercase tracking-wider mr-1">Presets:</span>
@@ -345,114 +415,109 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
       <div className="flex flex-col lg:flex-row gap-0 divide-y lg:divide-y-0 lg:divide-x divide-binance-border">
 
         {/* ═══ LEFT — Builder ═════════════════════════════════════════════ */}
-        <div className="lg:w-80 flex-shrink-0 px-4 py-4 flex flex-col gap-4">
+        <div className="lg:w-[360px] flex-shrink-0 px-4 py-4 flex flex-col gap-3">
 
-          {/* Conditions */}
+          {/* Side toggle */}
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-white uppercase tracking-wider">Entry Conditions</span>
-              <button
-                onClick={addCondition}
-                disabled={conditions.length >= FEATURE_OPTIONS.length}
-                className="text-xs px-2 py-0.5 rounded bg-binance-border text-binance-text hover:bg-binance-yellow hover:text-binance-dark disabled:opacity-40 transition"
-              >+ Add</button>
-            </div>
-
-            <div className="flex flex-col gap-2">
-              {conditions.map((cond, i) => (
-                <div key={i} className="bg-binance-dark border border-binance-border rounded-lg p-2.5 flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={cond.feature}
-                      onChange={(e) => updateFeature(i, e.target.value)}
-                      className="flex-1 text-xs bg-binance-border text-white rounded px-2 py-1.5 outline-none"
-                    >
-                      {FEATURE_OPTIONS.map((f) => (
-                        <option key={f.value} value={f.value}>{f.label}</option>
-                      ))}
-                    </select>
-                    <button
-                      onClick={() => removeCondition(i)}
-                      disabled={conditions.length <= 1}
-                      className="text-binance-muted hover:text-binance-red disabled:opacity-30 text-sm transition"
-                    >✕</button>
-                  </div>
-                  <div className="flex gap-1 flex-wrap">
-                    {([1, 2, 3, 4, 5] as const).map((b) => (
-                      <button
-                        key={b}
-                        onClick={() => toggleBucket(i, b)}
-                        title={BUCKET_LABELS[b]}
-                        className={`px-2 py-0.5 text-[10px] rounded font-semibold transition ${
-                          cond.buckets.includes(b)
-                            ? "bg-binance-yellow text-binance-dark"
-                            : "bg-binance-border text-binance-muted hover:text-white"
-                        }`}
-                      >Q{b}</button>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-binance-muted">
-                    Match: {cond.buckets.map((b) => BUCKET_LABELS[b]).join(" OR ")}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Direction */}
-          <div>
-            <span className="text-xs font-semibold text-white uppercase tracking-wider block mb-2">Direction</span>
+            <span className="text-xs font-semibold text-white uppercase tracking-wider block mb-1.5">Side</span>
             <div className="flex gap-1">
-              {(["long", "short", "both"] as const).map((s) => (
+              {(["long", "short", "both"] as const).map((sd) => (
                 <button
-                  key={s}
-                  onClick={() => setSide(s)}
+                  key={sd}
+                  onClick={() => setSide(sd)}
                   className={`flex-1 py-1.5 text-xs rounded font-semibold capitalize transition ${
-                    side === s
-                      ? s === "long"  ? "bg-binance-green text-white"
-                      : s === "short" ? "bg-binance-red text-white"
-                      : "bg-binance-yellow text-binance-dark"
+                    side === sd
+                      ? sd === "long"  ? "bg-binance-green text-white"
+                      : sd === "short" ? "bg-binance-red   text-white"
+                      :                  "bg-binance-yellow text-binance-dark"
                       : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
                   }`}
-                >{s}</button>
+                >{sd}</button>
               ))}
             </div>
           </div>
 
-          {/* Exit params */}
+          {/* Exit mode */}
           <div>
-            <span className="text-xs font-semibold text-white uppercase tracking-wider block mb-2">Exit Parameters</span>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { label: "TP (ATR×)", value: tpAtr, set: setTpAtr, min: 0.1, step: 0.1 },
-                { label: "SL (ATR×)", value: slAtr, set: setSlAtr, min: 0.1, step: 0.1 },
-                { label: "Max Hold (bars)", value: maxHold, set: setMaxHold, min: 1, step: 1 },
-                { label: "Cooldown (bars)", value: cooldown, set: setCooldown, min: 0, step: 1 },
-              ].map(({ label, value, set, min, step }) => (
-                <div key={label} className="flex flex-col gap-1">
-                  <label className="text-[10px] text-binance-muted">{label}</label>
-                  <input
-                    type="number"
-                    value={value}
-                    min={min}
-                    step={step}
-                    onChange={(e) => set(parseFloat(e.target.value) || min)}
-                    className="w-full bg-binance-dark border border-binance-border rounded px-2 py-1.5 text-sm text-white outline-none focus:border-binance-yellow transition"
-                  />
-                </div>
+            <span className="text-xs font-semibold text-white uppercase tracking-wider block mb-1.5">Exit Mode</span>
+            <div className="flex gap-1">
+              {(["signal-flip", "explicit"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setExitMode(m)}
+                  className={`flex-1 py-1.5 text-xs rounded font-medium transition ${
+                    exitMode === m
+                      ? "bg-purple-600 text-white"
+                      : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
+                  }`}
+                  title={m === "signal-flip"
+                    ? "Exit when opposite-side signal fires"
+                    : "Exit when explicit exit-conditions match"
+                  }
+                >
+                  {m === "signal-flip" ? "Signal Flip" : "Explicit Exit"}
+                </button>
               ))}
             </div>
+            <p className="text-[10px] text-binance-muted mt-1 leading-tight">
+              {exitMode === "signal-flip"
+                ? "Long exits on a bear signal; short exits on a bull signal."
+                : "Long & short both close when the explicit exit set matches."}
+            </p>
           </div>
 
-          {/* Risk preview */}
-          {slAtr > 0 && tpAtr > 0 && (
-            <div className="text-xs text-binance-muted bg-binance-dark border border-binance-border rounded-lg px-3 py-2 space-y-0.5">
-              <p>R:R = <span className="text-white font-semibold">{(tpAtr / slAtr).toFixed(2)}</span></p>
-              <p>Min win rate to break even: <span className="text-white font-semibold">
-                {(slAtr / (tpAtr + slAtr) * 100).toFixed(1)}%
-              </span></p>
-            </div>
+          {/* Position-flip toggle (only side=both + signal-flip) */}
+          {showFlipToggle && (
+            <label className="flex items-center gap-2 px-2.5 py-1.5 bg-binance-dark border border-binance-border rounded cursor-pointer">
+              <input
+                type="checkbox"
+                checked={flipOnSignal}
+                onChange={(e) => setFlipOnSignal(e.target.checked)}
+                className="accent-binance-yellow"
+              />
+              <span className="text-[11px] text-white">Flip position on counter-signal</span>
+              <span className="text-[10px] text-binance-muted ml-auto">always-in-market</span>
+            </label>
           )}
+
+          {/* Bull conditions */}
+          <ConditionEditor
+            title="🟢 Bull Conditions"
+            color="green"
+            conditions={bullConditions}
+            setConditions={setBullConditions}
+          />
+
+          {/* Bear conditions */}
+          <ConditionEditor
+            title="🔴 Bear Conditions"
+            color="red"
+            conditions={bearConditions}
+            setConditions={setBearConditions}
+          />
+
+          {/* Exit conditions (only in explicit mode) */}
+          {exitMode === "explicit" && (
+            <ConditionEditor
+              title="⏸ Exit Conditions"
+              color="yellow"
+              conditions={exitConditions}
+              setConditions={setExitConditions}
+            />
+          )}
+
+          {/* Cooldown */}
+          <div>
+            <span className="text-xs font-semibold text-white uppercase tracking-wider block mb-1.5">Cooldown (bars between trades)</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={cooldown}
+              onChange={(e) => setCooldown(Math.max(0, +e.target.value))}
+              className="w-full bg-binance-dark border border-binance-border rounded px-2 py-1.5 text-sm text-white outline-none focus:border-binance-yellow transition"
+            />
+          </div>
 
           {/* Run button */}
           <button
@@ -468,10 +533,10 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
             ) : "▶ Run Backtest"}
           </button>
 
-          {/* Save Strategy button */}
+          {/* Save Strategy */}
           <button
             onClick={() => setShowSave(true)}
-            disabled={conditions.length === 0}
+            disabled={bullConditions.length === 0 && bearConditions.length === 0}
             className="w-full py-2 bg-binance-yellow/20 hover:bg-binance-yellow text-binance-yellow hover:text-binance-dark border border-binance-yellow/50 disabled:opacity-40 text-xs font-bold rounded-lg transition flex items-center justify-center gap-2"
           >
             💾 Save as Strategy
@@ -488,7 +553,7 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
           {!result && !running && (
             <div className="flex flex-col items-center justify-center flex-1 py-16 text-binance-muted gap-3">
               <span className="text-4xl">🎯</span>
-              <p className="text-sm">Configure conditions and click <strong className="text-white">▶ Run Backtest</strong></p>
+              <p className="text-sm">Configure bull / bear (and optional exit) conditions and click <strong className="text-white">▶ Run Backtest</strong></p>
               <p className="text-xs">Or load a preset strategy to get started instantly.</p>
             </div>
           )}
@@ -504,9 +569,9 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                 <span className="text-white font-semibold">{result.stats.totalTrades}</span> trades
               </div>
 
-              {/* ── Tabs ────────────────────────────────────────────── */}
+              {/* Tabs */}
               <div className="flex gap-1 border-b border-binance-border pb-0">
-                {(["stats", "log"] as const).map((t) => (
+                {(["stats", "log", "chart"] as const).map((t) => (
                   <button
                     key={t}
                     onClick={() => setTradeTab(t)}
@@ -516,7 +581,7 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                         : "border-transparent text-binance-muted hover:text-white"
                     }`}
                   >
-                    {t === "stats" ? "📊 Statistics" : "📋 Trade Log"}
+                    {t === "stats" ? "📊 Statistics" : t === "log" ? "📋 Trade Log" : "📈 Trades Chart"}
                   </button>
                 ))}
                 {tradeTab === "log" && result.trades.length > 0 && (
@@ -527,10 +592,9 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                 )}
               </div>
 
-              {/* ── Stats view ────────────────────────────────────── */}
+              {/* Stats view */}
               {tradeTab === "stats" && s && (
                 <div className="flex flex-col gap-4">
-                  {/* Key stats grid */}
                   <div className="flex flex-wrap gap-2">
                     <Stat label="Total Return"
                       value={`${s.totalReturnPct >= 0 ? "+" : ""}${s.totalReturnPct.toFixed(2)}%`}
@@ -547,31 +611,19 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                       color={s.expectancy >= 0 ? "text-binance-green" : "text-binance-red"}
                       sub="per trade" />
                     <Stat label="Max Drawdown"
-                      value={`-${s.maxDrawdownPct.toFixed(2)}%`}
-                      color="text-binance-red" />
+                      value={`-${s.maxDrawdownPct.toFixed(2)}%`} color="text-binance-red" />
                     <Stat label="Sharpe"
                       value={s.sharpe.toFixed(2)}
                       color={s.sharpe >= 1.5 ? "text-binance-green" : s.sharpe >= 0.5 ? "text-binance-yellow" : "text-binance-red"} />
-                    <Stat label="Avg Win"
-                      value={`+${s.avgWinPct.toFixed(3)}%`}
-                      color="text-binance-green" />
-                    <Stat label="Avg Loss"
-                      value={`${s.avgLossPct.toFixed(3)}%`}
-                      color="text-binance-red" />
-                    <Stat label="Avg Hold"
-                      value={`${s.avgHoldBars.toFixed(1)}b`} />
-                    <Stat label="Max Consec L"
-                      value={String(s.maxConsecLosses)}
+                    <Stat label="Avg Win" value={`+${s.avgWinPct.toFixed(3)}%`} color="text-binance-green" />
+                    <Stat label="Avg Loss" value={`${s.avgLossPct.toFixed(3)}%`} color="text-binance-red" />
+                    <Stat label="Avg Hold" value={`${s.avgHoldBars.toFixed(1)}b`} />
+                    <Stat label="Max Consec L" value={String(s.maxConsecLosses)}
                       color={s.maxConsecLosses >= 5 ? "text-binance-red" : "text-white"} />
-                    <Stat label="Best Trade"
-                      value={`+${s.bestTradePct.toFixed(3)}%`}
-                      color="text-binance-green" />
-                    <Stat label="Worst Trade"
-                      value={`${s.worstTradePct.toFixed(3)}%`}
-                      color="text-binance-red" />
+                    <Stat label="Best Trade" value={`+${s.bestTradePct.toFixed(3)}%`} color="text-binance-green" />
+                    <Stat label="Worst Trade" value={`${s.worstTradePct.toFixed(3)}%`} color="text-binance-red" />
                   </div>
 
-                  {/* Equity curve */}
                   <div className="bg-binance-dark border border-binance-border rounded-xl p-3">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-semibold text-white">Equity Curve (cumulative %)</span>
@@ -580,19 +632,21 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                     <EquityCurve curve={result.equityCurve} />
                   </div>
 
-                  {/* Exit breakdown */}
+                  {/* Exit-reason breakdown */}
                   {result.trades.length > 0 && (
                     <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                      {(["tp", "sl", "maxhold"] as const).map((reason) => {
+                      {(["signal", "explicit", "open-end"] as const).map((reason) => {
                         const cnt = result.trades.filter((t) => t.exitReason === reason).length;
+                        if (cnt === 0 && reason === "explicit" && exitMode !== "explicit") return null;
                         const pct = (cnt / result.trades.length * 100).toFixed(1);
-                        const color = reason === "tp" ? "text-binance-green" : reason === "sl" ? "text-binance-red" : "text-binance-muted";
+                        const color = reason === "signal" ? "text-purple-400" : reason === "explicit" ? "text-binance-yellow" : "text-binance-muted";
+                        const label = reason === "signal" ? "🔄 Signal flip"
+                                    : reason === "explicit" ? "⏸ Explicit exit"
+                                    : "⏹ Open-end";
                         return (
                           <div key={reason} className="bg-binance-dark border border-binance-border rounded-lg py-2">
                             <div className={`text-sm font-bold ${color}`}>{cnt}</div>
-                            <div className="text-binance-muted text-[10px]">
-                              {reason === "tp" ? "✓ TP Hit" : reason === "sl" ? "✗ SL Hit" : "⏱ Max Hold"}
-                            </div>
+                            <div className="text-binance-muted text-[10px]">{label}</div>
                             <div className="text-[10px] text-binance-muted">{pct}%</div>
                           </div>
                         );
@@ -602,7 +656,7 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                 </div>
               )}
 
-              {/* ── Trade log ─────────────────────────────────────── */}
+              {/* Trade log */}
               {tradeTab === "log" && (
                 <div>
                   {trades.length === 0 ? (
@@ -626,9 +680,11 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                           </thead>
                           <tbody>
                             {tradeSlice.map((t: Trade, i: number) => {
-                              const idx    = (tradePage - 1) * TRADE_PAGE_SIZE + i + 1;
-                              const isWin  = t.pnlPct > 0;
-                              const pLabel = t.exitReason === "tp" ? "✓ TP" : t.exitReason === "sl" ? "✗ SL" : "⏱";
+                              const idx = (tradePage - 1) * TRADE_PAGE_SIZE + i + 1;
+                              const isWin = t.pnlPct > 0;
+                              const reasonLabel = t.exitReason === "signal" ? "🔄 Signal"
+                                                : t.exitReason === "explicit" ? "⏸ Explicit"
+                                                : "⏹ End";
                               return (
                                 <tr key={i} className="border-b border-binance-border/30 hover:bg-binance-border/20 transition">
                                   <td className="px-3 py-1.5 text-binance-muted">{idx}</td>
@@ -645,8 +701,8 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                                     {t.pnlPct >= 0 ? "+" : ""}{t.pnlPct.toFixed(3)}%
                                   </td>
                                   <td className={`px-3 py-1.5 text-center text-[10px] font-semibold ${
-                                    t.exitReason === "tp" ? "text-binance-green" : t.exitReason === "sl" ? "text-binance-red" : "text-binance-muted"
-                                  }`}>{pLabel}</td>
+                                    t.exitReason === "signal" ? "text-purple-400" : t.exitReason === "explicit" ? "text-binance-yellow" : "text-binance-muted"
+                                  }`}>{reasonLabel}</td>
                                   <td className="px-3 py-1.5 text-right text-binance-muted">{t.durationBars}b</td>
                                 </tr>
                               );
@@ -655,7 +711,6 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                         </table>
                       </div>
 
-                      {/* Simple pagination */}
                       {totalPages > 1 && (
                         <div className="flex items-center justify-center gap-2 mt-3">
                           <button onClick={() => setTradePage((p) => Math.max(1, p - 1))} disabled={tradePage === 1}
@@ -673,6 +728,53 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
                   )}
                 </div>
               )}
+
+              {/* Trades chart */}
+              {tradeTab === "chart" && (
+                <div className="flex flex-col gap-3">
+                  {/* Symbol picker (multi mode) */}
+                  {symbolsInTrades.length > 1 && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs text-binance-muted">Symbol:</span>
+                      {symbolsInTrades.map((sym) => {
+                        const cnt = trades.filter((t) => t.symbol === sym).length;
+                        return (
+                          <button
+                            key={sym}
+                            onClick={() => setChartSymbol(sym)}
+                            className={`px-2.5 py-1 text-xs rounded font-mono font-medium transition ${
+                              chartSymbol === sym
+                                ? "bg-binance-yellow text-binance-dark"
+                                : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
+                            }`}
+                          >
+                            {sym} <span className="opacity-60">({cnt})</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {chartKlines.length === 0 ? (
+                    <div className="text-center py-12 text-binance-muted text-sm">
+                      Chart only available for the symbol whose klines are loaded.
+                      {chartSymbol && symbol && chartSymbol !== symbol && (
+                        <span className="block mt-2 text-[11px]">
+                          Showing trades for <span className="font-mono text-white">{chartSymbol}</span>{" "}
+                          but loaded klines are for <span className="font-mono text-white">{symbol}</span>.
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <TradesChart
+                      klines={chartKlines}
+                      trades={chartTrades}
+                      symbol={chartSymbol || symbol}
+                      interval={interval}
+                    />
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -682,8 +784,8 @@ export default function StrategyBuilder({ bars, initialParams, symbol = "", inte
       {showSave && (
         <SaveStrategyModal
           defaultName={
-            conditions.length > 0
-              ? `${conditions[0].feature} Q${conditions[0].buckets.join("/")}${conditions.length > 1 ? ` +${conditions.length - 1}` : ""} ${side}`
+            bullConditions.length > 0 || bearConditions.length > 0
+              ? `${side === "long" ? "Long" : side === "short" ? "Short" : "Both"} · ${(bullConditions[0]?.feature ?? bearConditions[0]?.feature) ?? "custom"}`
               : "My Strategy"
           }
           defaultDesc={

@@ -1,12 +1,25 @@
 /**
- * Intrabar backtesting engine.
+ * Backtest engine — signal-driven exits, no TP/SL/maxHold.
  *
- * Entry: close of signal bar.
- * Exit priority per subsequent bar:
- *   1. If high >= TP and low <= SL in same bar → assume SL (worst case)
- *   2. If high >= TP (long) / low <= TP (short) → WIN
- *   3. If low <= SL (long) / high >= SL (short) → LOSS
- *   4. After maxHold bars → exit at close (MAXHOLD)
+ * Model:
+ *   Bull conditions match → bullish bar.
+ *   Bear conditions match → bearish bar.
+ *   Side filter:
+ *     - "long":  open longs on bull bars only.
+ *     - "short": open shorts on bear bars only.
+ *     - "both":  open whichever side fires when no position is open.
+ *   Exit mode:
+ *     - "signal-flip": opposite-side signal closes the position.
+ *                      If side="both" AND flipOnSignal, the same bar opens
+ *                      the opposite-side position.
+ *     - "explicit":    a separate exitConditions set closes any open position
+ *                      regardless of which side it is.
+ *   No TP/SL targets, no maxHold. If neither an opposite signal nor an exit
+ *   signal ever fires, the position is force-closed at the last bar with
+ *   exitReason="open-end".
+ *
+ * Trade exit price is the close of the bar on which the exit signal fires.
+ * (Signals are evaluated at bar close, so this is the earliest tradeable price.)
  *
  * All conditions are AND'd. Buckets within one condition are OR'd.
  */
@@ -16,61 +29,70 @@ import type { EnrichedBar } from "./types";
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export interface Condition {
-  feature: string;           // keyof EnrichedBar
-  buckets: (1 | 2 | 3 | 4 | 5)[]; // match if bar's bucket is in this set
+  feature: string;                 // keyof EnrichedBar
+  buckets: (1 | 2 | 3 | 4 | 5)[];  // match if bar's bucket is in this set
 }
+
+export type ExitMode = "signal-flip" | "explicit";
 
 export interface BacktestParams {
-  conditions: Condition[];
-  side:       "long" | "short" | "both";
-  tpAtr:      number;  // TP distance = tpAtr × ATR14
-  slAtr:      number;  // SL distance = slAtr × ATR14
-  maxHold:    number;  // exit at close after this many bars
-  cooldown:   number;  // min bars between entries (skip overlapping signals)
+  bullConditions: Condition[];
+  bearConditions: Condition[];
+  exitMode:       ExitMode;
+  /** Used only when exitMode === "explicit". */
+  exitConditions: Condition[];
+  side:           "long" | "short" | "both";
+  /** Only relevant when side="both" AND exitMode="signal-flip". */
+  flipOnSignal:   boolean;
+  /** Min bars between an exit and the next entry, per symbol. */
+  cooldown:       number;
 }
 
+export type ExitReason = "signal" | "explicit" | "open-end";
+
 export interface Trade {
-  entryBar:    number;
-  symbol:      string;
-  entryTime:   number;
-  entryPrice:  number;
-  exitTime:    number;
-  exitPrice:   number;
-  side:        "long" | "short";
-  pnlPct:      number;        // % return (signed)
-  atrAtEntry:  number;
-  exitReason:  "tp" | "sl" | "maxhold";
+  entryBar:     number;
+  symbol:       string;
+  entryTime:    number;
+  entryPrice:   number;
+  exitBar:      number;
+  exitTime:     number;
+  exitPrice:    number;
+  side:         "long" | "short";
+  pnlPct:       number;
+  atrAtEntry:   number;
+  exitReason:   ExitReason;
   durationBars: number;
 }
 
 export interface BacktestStats {
-  totalTrades:       number;
-  wins:              number;
-  losses:            number;
-  winRate:           number;   // 0..1
-  profitFactor:      number;
-  avgWinPct:         number;
-  avgLossPct:        number;   // negative
-  expectancy:        number;   // avg pnlPct per trade
-  maxDrawdownPct:    number;   // largest peak-to-trough in equity %
-  totalReturnPct:    number;   // sum of all pnlPct
-  signalRate:        number;   // signalBars / totalBars
-  avgHoldBars:       number;
-  bestTradePct:      number;
-  worstTradePct:     number;
-  maxConsecLosses:   number;
-  sharpe:            number;   // mean/std of trade returns * sqrt(252)
+  totalTrades:     number;
+  wins:            number;
+  losses:          number;
+  winRate:         number;
+  profitFactor:    number;
+  avgWinPct:       number;
+  avgLossPct:      number;
+  expectancy:      number;
+  maxDrawdownPct:  number;
+  totalReturnPct:  number;
+  signalRate:      number;
+  avgHoldBars:     number;
+  bestTradePct:    number;
+  worstTradePct:   number;
+  maxConsecLosses: number;
+  sharpe:          number;
 }
 
 export interface BacktestResult {
-  trades:        Trade[];
-  equityCurve:   { time: number; equity: number }[];   // one point per trade
-  stats:         BacktestStats;
-  signalBars:    number;
-  totalBars:     number;
+  trades:      Trade[];
+  equityCurve: { time: number; equity: number }[];
+  stats:       BacktestStats;
+  signalBars:  number;
+  totalBars:   number;
 }
 
-// ─── Preset strategies (exported for UI) ─────────────────────────────────────
+// ─── Preset strategies ────────────────────────────────────────────────────────
 
 export interface Preset {
   name:        string;
@@ -80,86 +102,106 @@ export interface Preset {
 
 export const PRESETS: Preset[] = [
   {
-    name:        "Mean Reversion Long",
-    description: "Enter when RSI, price vs EMA20, and CVD are all at their lowest — exploits oversold exhaustion",
+    name:        "Mean Reversion (Long)",
+    description: "Long when RSI / EMA-distance / CVD are all at the lowest quintile; exit when they swing to the highest.",
     params: {
-      conditions: [
+      bullConditions: [
         { feature: "rsi14",        buckets: [1] },
         { feature: "distEma20Atr", buckets: [1] },
         { feature: "cvdRatio",     buckets: [1] },
       ],
-      side:     "long",
-      tpAtr:    1.5,
-      slAtr:    1.0,
-      maxHold:  20,
-      cooldown: 5,
+      bearConditions: [
+        { feature: "rsi14",        buckets: [5] },
+        { feature: "distEma20Atr", buckets: [5] },
+      ],
+      exitMode:       "signal-flip",
+      exitConditions: [],
+      side:           "long",
+      flipOnSignal:   false,
+      cooldown:       3,
     },
   },
   {
-    name:        "Volatility Breakout",
-    description: "Trade expansions when volume spikes, ATR is high and BBands are wide — momentum in either direction",
+    name:        "Volatility Breakout (Both)",
+    description: "Trade expansions when volume + ATR + BB-width all spike. Position flips on opposing signal.",
     params: {
-      conditions: [
-        { feature: "volRatio",    buckets: [5] },
-        { feature: "atrPct",      buckets: [5] },
-        { feature: "bbWidth",     buckets: [4, 5] },
+      bullConditions: [
+        { feature: "volRatio",  buckets: [5] },
+        { feature: "atrPct",    buckets: [5] },
+        { feature: "bodyRatio", buckets: [5] },
       ],
-      side:     "both",
-      tpAtr:    2.0,
-      slAtr:    1.0,
-      maxHold:  10,
-      cooldown: 3,
+      bearConditions: [
+        { feature: "volRatio",  buckets: [5] },
+        { feature: "atrPct",    buckets: [5] },
+        { feature: "bodyRatio", buckets: [1] },
+      ],
+      exitMode:       "signal-flip",
+      exitConditions: [],
+      side:           "both",
+      flipOnSignal:   true,
+      cooldown:       3,
     },
   },
   {
     name:        "Momentum Long",
-    description: "Ride overbought high-taker-buy setups — strong buying flow with price above EMAs",
+    description: "Ride strong taker-buy / RSI / EMA-distance setups; exit on contrarian flow weakening.",
     params: {
-      conditions: [
+      bullConditions: [
         { feature: "takerBuyRatio", buckets: [5] },
         { feature: "rsi14",         buckets: [4, 5] },
         { feature: "distEma20Atr",  buckets: [4, 5] },
       ],
-      side:     "long",
-      tpAtr:    1.5,
-      slAtr:    1.0,
-      maxHold:  10,
-      cooldown: 3,
+      bearConditions: [
+        { feature: "takerBuyRatio", buckets: [1, 2] },
+        { feature: "rsi14",         buckets: [1, 2] },
+      ],
+      exitMode:       "signal-flip",
+      exitConditions: [],
+      side:           "long",
+      flipOnSignal:   false,
+      cooldown:       3,
     },
   },
   {
-    name:        "Funding Rate Fade",
-    description: "Fade extreme funding — when longs are paying heavily (funding Q5), price tends to dip; short it",
+    name:        "Funding-Rate Fade (Short)",
+    description: "Fade extreme funding — when longs are paying heavily, the price often retraces. Exit when funding normalises.",
     params: {
-      conditions: [
-        { feature: "fundingRate",  buckets: [5] },
-        { feature: "rsi14",        buckets: [4, 5] },
+      bullConditions: [
+        { feature: "fundingRate", buckets: [1] },
+        { feature: "rsi14",       buckets: [1, 2] },
       ],
-      side:     "short",
-      tpAtr:    1.5,
-      slAtr:    1.0,
-      maxHold:  20,
-      cooldown: 10,
+      bearConditions: [
+        { feature: "fundingRate", buckets: [5] },
+        { feature: "rsi14",       buckets: [4, 5] },
+      ],
+      exitMode:       "signal-flip",
+      exitConditions: [],
+      side:           "short",
+      flipOnSignal:   false,
+      cooldown:       5,
     },
   },
   {
-    name:        "OI Squeeze Long",
-    description: "When OI drops sharply (short squeeze incoming) with price near EMA support",
+    name:        "Explicit-Exit Demo",
+    description: "Same RSI mean-reversion entry, but exit fires on an explicit RSI Q3+ rather than a bear signal — useful when entry & exit logic differ.",
     params: {
-      conditions: [
-        { feature: "oiChangePct",  buckets: [1] },
-        { feature: "distEma20Atr", buckets: [1, 2] },
+      bullConditions: [
+        { feature: "rsi14",        buckets: [1] },
+        { feature: "distEma20Atr", buckets: [1] },
       ],
-      side:     "long",
-      tpAtr:    2.0,
-      slAtr:    1.0,
-      maxHold:  15,
-      cooldown: 5,
+      bearConditions: [],
+      exitMode:       "explicit",
+      exitConditions: [
+        { feature: "rsi14", buckets: [3, 4, 5] },
+      ],
+      side:           "long",
+      flipOnSignal:   false,
+      cooldown:       3,
     },
   },
 ];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers: quintile boundaries ─────────────────────────────────────────────
 
 function quintileBounds(bars: EnrichedBar[], feature: string): [number, number, number, number] {
   const vals = bars
@@ -184,6 +226,23 @@ function getQuintile(v: number, b: [number, number, number, number]): 1 | 2 | 3 
   return 5;
 }
 
+function allConditionsMet(
+  bar:     EnrichedBar,
+  conds:   Condition[],
+  bounds:  Map<string, [number, number, number, number]>,
+): boolean {
+  if (conds.length === 0) return false;
+  for (const c of conds) {
+    const raw = (bar as unknown as Record<string, unknown>)[c.feature];
+    if (raw === null || raw === undefined || !isFinite(raw as number)) return false;
+    const q = getQuintile(raw as number, bounds.get(c.feature)!);
+    if (!c.buckets.includes(q)) return false;
+  }
+  return true;
+}
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
 function calcStats(trades: Trade[], signalBars: number, totalBars: number): BacktestStats {
   if (trades.length === 0) {
     return {
@@ -201,7 +260,6 @@ function calcStats(trades: Trade[], signalBars: number, totalBars: number): Back
   const grossProfit = wins.reduce((s, t) => s + t.pnlPct, 0);
   const grossLoss   = Math.abs(losses.reduce((s, t) => s + t.pnlPct, 0));
 
-  // Max drawdown from equity curve
   let peak = 0, equity = 0, maxDD = 0;
   for (const t of trades) {
     equity += t.pnlPct;
@@ -210,14 +268,12 @@ function calcStats(trades: Trade[], signalBars: number, totalBars: number): Back
     if (dd > maxDD) maxDD = dd;
   }
 
-  // Max consecutive losses
   let curLoss = 0, maxConsec = 0;
   for (const t of trades) {
     if (t.pnlPct <= 0) { curLoss++; maxConsec = Math.max(maxConsec, curLoss); }
     else curLoss = 0;
   }
 
-  // Simplified Sharpe: mean return / std dev of returns
   const returns = trades.map((t) => t.pnlPct);
   const mean    = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
@@ -244,125 +300,216 @@ function calcStats(trades: Trade[], signalBars: number, totalBars: number): Back
   };
 }
 
+// ─── Position state during the run ────────────────────────────────────────────
+
+interface OpenPosition {
+  side:       "long" | "short";
+  entryBar:   number;
+  entryTime:  number;
+  entryPrice: number;
+  atrAtEntry: number;
+  symbol:     string;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export function runBacktest(
-  bars: EnrichedBar[],
-  params: BacktestParams
+  bars:   EnrichedBar[],
+  params: BacktestParams,
 ): BacktestResult {
-  const { conditions, side, tpAtr, slAtr, maxHold, cooldown } = params;
+  const {
+    bullConditions, bearConditions, exitMode, exitConditions,
+    side, flipOnSignal, cooldown,
+  } = params;
+
   const n = bars.length;
-  if (n === 0 || conditions.length === 0) {
+  if (n === 0 || (bullConditions.length === 0 && bearConditions.length === 0)) {
     return { trades: [], equityCurve: [], stats: calcStats([], 0, 0), signalBars: 0, totalBars: n };
   }
 
-  // Precompute quintile boundaries for each feature in conditions
+  // Precompute quintile boundaries for all features in any condition set
+  const allFeats = new Set<string>();
+  for (const c of [...bullConditions, ...bearConditions, ...exitConditions]) allFeats.add(c.feature);
   const bounds = new Map<string, [number, number, number, number]>();
-  for (const cond of conditions) {
-    if (!bounds.has(cond.feature)) {
-      bounds.set(cond.feature, quintileBounds(bars, cond.feature));
-    }
-  }
+  for (const f of allFeats) bounds.set(f, quintileBounds(bars, f));
 
-  const trades:     Trade[] = [];
-  const equityCurve: { time: number; equity: number }[] = [];
-  let   equity      = 0;
-  let   signalBars  = 0;
-  const lastEntry   = new Map<string, number>(); // symbol → last entry bar index
+  const trades:    Trade[] = [];
+  let   signalBars = 0;
 
-  for (let i = 0; i < n - 1; i++) {
+  // Per-symbol mutable state
+  const open:      Map<string, OpenPosition> = new Map();
+  const lastExit:  Map<string, number>       = new Map();
+
+  // Helper to close a position
+  const closePos = (
+    sym: string,
+    barIdx: number,
+    reason: ExitReason,
+  ): Trade | null => {
+    const pos = open.get(sym);
+    if (!pos) return null;
+    const exitBar  = barIdx;
+    const b        = bars[exitBar];
+    const exitPrice = b.close;
+    const pnlPct = pos.side === "long"
+      ? ((exitPrice - pos.entryPrice) / pos.entryPrice) * 100
+      : ((pos.entryPrice - exitPrice) / pos.entryPrice) * 100;
+    const t: Trade = {
+      entryBar:    pos.entryBar,
+      symbol:      pos.symbol,
+      entryTime:   pos.entryTime,
+      entryPrice:  pos.entryPrice,
+      exitBar,
+      exitTime:    b.openTime,
+      exitPrice,
+      side:        pos.side,
+      pnlPct:      Math.round(pnlPct * 10000) / 10000,
+      atrAtEntry:  pos.atrAtEntry,
+      exitReason:  reason,
+      durationBars: exitBar - pos.entryBar,
+    };
+    open.delete(sym);
+    lastExit.set(sym, exitBar);
+    trades.push(t);
+    return t;
+  };
+
+  // Helper to open a position
+  const openPos = (sym: string, barIdx: number, dir: "long" | "short") => {
+    const b = bars[barIdx];
+    open.set(sym, {
+      side:       dir,
+      entryBar:   barIdx,
+      entryTime:  b.openTime,
+      entryPrice: b.close,
+      atrAtEntry: b.atr14 ?? b.close * 0.01,
+      symbol:     sym,
+    });
+  };
+
+  for (let i = 0; i < n; i++) {
     const bar = bars[i];
+    const sym = bar.symbol;
 
-    // Cooldown check per symbol
-    const lastBar = lastEntry.get(bar.symbol) ?? -Infinity;
-    if (i - lastBar < cooldown) continue;
+    const bullSig = allConditionsMet(bar, bullConditions, bounds);
+    const bearSig = allConditionsMet(bar, bearConditions, bounds);
+    const exitSig = exitMode === "explicit" && allConditionsMet(bar, exitConditions, bounds);
 
-    // Check all conditions (AND logic)
-    let allMet = true;
-    for (const cond of conditions) {
-      const raw = (bar as unknown as Record<string, unknown>)[cond.feature];
-      if (raw === null || raw === undefined || !isFinite(raw as number)) {
-        allMet = false; break;
+    if (bullSig || bearSig) signalBars++;
+
+    const pos = open.get(sym);
+
+    // ── Exit logic ──
+    if (pos) {
+      if (exitMode === "explicit") {
+        if (exitSig) {
+          closePos(sym, i, "explicit");
+          // Don't re-enter on the same bar
+          continue;
+        }
+      } else {
+        // signal-flip
+        const counter = pos.side === "long" ? bearSig : bullSig;
+        if (counter) {
+          closePos(sym, i, "signal");
+          // Optional flip when side=both
+          if (side === "both" && flipOnSignal) {
+            const dir: "long" | "short" = pos.side === "long" ? "short" : "long";
+            openPos(sym, i, dir);
+          }
+          continue;
+        }
       }
-      const q = getQuintile(raw as number, bounds.get(cond.feature)!);
-      if (!cond.buckets.includes(q)) { allMet = false; break; }
     }
-    if (!allMet) continue;
 
-    signalBars++;
-    const atr = bar.atr14 ?? bar.close * 0.01; // fallback: 1% of price
+    // ── Entry logic ──
+    if (!open.has(sym)) {
+      // Cooldown check
+      const last = lastExit.get(sym);
+      if (last !== undefined && i - last < cooldown) continue;
 
-    const sides: ("long" | "short")[] =
-      side === "both" ? ["long", "short"] : [side];
-
-    for (const s of sides) {
-      const entry = bar.close;
-      const tp    = s === "long" ? entry + atr * tpAtr : entry - atr * tpAtr;
-      const sl    = s === "long" ? entry - atr * slAtr : entry + atr * slAtr;
-
-      let exitBar    = Math.min(i + maxHold, n - 1);
-      let exitPrice  = bars[exitBar].close;
-      let exitReason: "tp" | "sl" | "maxhold" = "maxhold";
-
-      for (let j = i + 1; j <= Math.min(i + maxHold, n - 1); j++) {
-        const { high, low, close } = bars[j];
-        const tpHit = s === "long" ? high >= tp : low  <= tp;
-        const slHit = s === "long" ? low  <= sl : high >= sl;
-
-        if (tpHit && slHit) {
-          // Both in same bar — assume SL hit (conservative)
-          exitBar = j; exitPrice = sl; exitReason = "sl"; break;
-        }
-        if (tpHit) {
-          exitBar = j; exitPrice = tp; exitReason = "tp"; break;
-        }
-        if (slHit) {
-          exitBar = j; exitPrice = sl; exitReason = "sl"; break;
-        }
-        if (j === i + maxHold) {
-          exitBar = j; exitPrice = close; exitReason = "maxhold"; break;
-        }
+      if (side !== "short" && bullSig) {
+        openPos(sym, i, "long");
+      } else if (side !== "long" && bearSig) {
+        openPos(sym, i, "short");
       }
-
-      const pnlPct = s === "long"
-        ? ((exitPrice - entry) / entry) * 100
-        : ((entry - exitPrice) / entry) * 100;
-
-      trades.push({
-        entryBar:    i,
-        symbol:      bar.symbol,
-        entryTime:   bar.openTime,
-        entryPrice:  entry,
-        exitTime:    bars[exitBar].openTime,
-        exitPrice,
-        side:        s,
-        pnlPct:      Math.round(pnlPct * 10000) / 10000,
-        atrAtEntry:  atr,
-        exitReason,
-        durationBars: exitBar - i,
-      });
-
-      equity += pnlPct;
-      equityCurve.push({ time: bar.openTime, equity: Math.round(equity * 100) / 100 });
-      lastEntry.set(bar.symbol, i);
     }
   }
 
-  // Sort trades chronologically
-  trades.sort((a, b) => a.entryTime - b.entryTime);
+  // Force-close any positions still open at end of data
+  // (use the last bar of each symbol)
+  if (open.size > 0) {
+    // Find last bar index per symbol
+    const lastBarIdx = new Map<string, number>();
+    for (let i = n - 1; i >= 0; i--) {
+      const sym = bars[i].symbol;
+      if (!lastBarIdx.has(sym)) lastBarIdx.set(sym, i);
+    }
+    for (const sym of [...open.keys()]) {
+      const idx = lastBarIdx.get(sym);
+      if (idx !== undefined) closePos(sym, idx, "open-end");
+    }
+  }
 
-  // Rebuild equity curve chronologically
+  // Sort chronologically and rebuild equity curve
+  trades.sort((a, b) => a.entryTime - b.entryTime);
   let cum = 0;
-  const sortedCurve = trades.map((t) => {
+  const equityCurve = trades.map((t) => {
     cum += t.pnlPct;
     return { time: t.entryTime, equity: Math.round(cum * 100) / 100 };
   });
 
   return {
     trades,
-    equityCurve: sortedCurve,
+    equityCurve,
     stats: calcStats(trades, signalBars, n),
     signalBars,
     totalBars: n,
+  };
+}
+
+// ─── Migration helper for legacy params (conditions+tpAtr+slAtr+maxHold) ───────
+
+interface LegacyParams {
+  conditions: Condition[];
+  side:       "long" | "short" | "both";
+  tpAtr?:     number;
+  slAtr?:     number;
+  maxHold?:   number;
+  cooldown?:  number;
+}
+
+/**
+ * Convert legacy single-`conditions` params to the new bull/bear/exit shape.
+ * The old `conditions` are interpreted as bullish (long) or bearish (short) based on `side`.
+ * Bear-side fallback: empty (user can fill in later).
+ * Returns the new params, or the input unchanged if it already looks new.
+ */
+export function migrateLegacyParams(p: unknown): BacktestParams {
+  const obj = p as Record<string, unknown>;
+  // Already new shape
+  if ("bullConditions" in obj || "bearConditions" in obj || "exitMode" in obj) {
+    const cur = p as Partial<BacktestParams>;
+    return {
+      bullConditions: cur.bullConditions ?? [],
+      bearConditions: cur.bearConditions ?? [],
+      exitMode:       cur.exitMode       ?? "signal-flip",
+      exitConditions: cur.exitConditions ?? [],
+      side:           cur.side           ?? "long",
+      flipOnSignal:   cur.flipOnSignal   ?? false,
+      cooldown:       cur.cooldown       ?? 3,
+    };
+  }
+  // Legacy
+  const lg = p as LegacyParams;
+  const conds = (lg.conditions ?? []).map((c) => ({ feature: c.feature, buckets: [...c.buckets] }));
+  return {
+    bullConditions: lg.side === "short" ? [] : conds,
+    bearConditions: lg.side === "long"  ? [] : conds,
+    exitMode:       "signal-flip",
+    exitConditions: [],
+    side:           lg.side ?? "long",
+    flipOnSignal:   lg.side === "both",
+    cooldown:       lg.cooldown ?? 3,
   };
 }

@@ -690,7 +690,8 @@ export default function OHLCVDashboard() {
           <AnalysisPanel
             result={analysisResult}
             bars={enrichedBars}
-            symbol={mode === "single" ? symbol : `${multiResults.filter((r) => r.status === "ok").length} pairs`}
+            klines={mode === "single" ? singleKlines : activeKlines}
+            symbol={mode === "single" ? symbol : (activePair || `${multiResults.filter((r) => r.status === "ok").length} pairs`)}
             interval={barLength}
           />
         )}

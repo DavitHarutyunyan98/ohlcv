@@ -13,6 +13,7 @@
  */
 
 import type { BacktestParams } from "./backtest";
+import { migrateLegacyParams } from "./backtest";
 import type { BacktestStats } from "./backtest";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -60,7 +61,10 @@ function readLocal(): SavedStrategy[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((s) => s && typeof s.id === "string" && s.params);
+    // Migrate any legacy-shaped params on the fly.
+    return parsed
+      .filter((s) => s && typeof s.id === "string" && s.params)
+      .map((s) => ({ ...s, params: migrateLegacyParams(s.params) })) as SavedStrategy[];
   } catch {
     return [];
   }
@@ -234,12 +238,13 @@ function sortByUpdated(list: SavedStrategy[]): SavedStrategy[] {
 
 function cloneParams(p: BacktestParams): BacktestParams {
   return {
-    conditions: p.conditions.map((c) => ({ feature: c.feature, buckets: [...c.buckets] })),
-    side:       p.side,
-    tpAtr:      p.tpAtr,
-    slAtr:      p.slAtr,
-    maxHold:    p.maxHold,
-    cooldown:   p.cooldown,
+    bullConditions: p.bullConditions.map((c) => ({ feature: c.feature, buckets: [...c.buckets] })),
+    bearConditions: p.bearConditions.map((c) => ({ feature: c.feature, buckets: [...c.buckets] })),
+    exitMode:       p.exitMode,
+    exitConditions: p.exitConditions.map((c) => ({ feature: c.feature, buckets: [...c.buckets] })),
+    side:           p.side,
+    flipOnSignal:   p.flipOnSignal,
+    cooldown:       p.cooldown,
   };
 }
 

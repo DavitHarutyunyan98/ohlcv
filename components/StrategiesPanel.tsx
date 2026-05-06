@@ -173,24 +173,55 @@ function StrategyDetails({ s, bars, onEdit, onSend, onDelete, onClose }: {
       </div>
 
       {/* Conditions */}
-      <div>
-        <div className="text-[10px] text-binance-muted uppercase tracking-wider mb-1">Entry Conditions</div>
-        <div className="flex flex-wrap gap-1.5">
-          {s.params.conditions.map((c, ci) => (
-            <span key={ci} className="px-2 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
-              {c.feature} [{c.buckets.map((b) => `Q${b}`).join("/")}]
-            </span>
-          ))}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <div className="text-[10px] text-binance-green uppercase tracking-wider mb-1">🟢 Bull Conditions</div>
+          {s.params.bullConditions.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {s.params.bullConditions.map((c, ci) => (
+                <span key={ci} className="px-2 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
+                  {c.feature} [{c.buckets.map((b) => `Q${b}`).join("/")}]
+                </span>
+              ))}
+            </div>
+          ) : <span className="text-[10px] text-binance-muted italic">none</span>}
         </div>
+
+        <div>
+          <div className="text-[10px] text-binance-red uppercase tracking-wider mb-1">🔴 Bear Conditions</div>
+          {s.params.bearConditions.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {s.params.bearConditions.map((c, ci) => (
+                <span key={ci} className="px-2 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
+                  {c.feature} [{c.buckets.map((b) => `Q${b}`).join("/")}]
+                </span>
+              ))}
+            </div>
+          ) : <span className="text-[10px] text-binance-muted italic">none</span>}
+        </div>
+
+        {s.params.exitMode === "explicit" && s.params.exitConditions.length > 0 && (
+          <div className="md:col-span-2">
+            <div className="text-[10px] text-binance-yellow uppercase tracking-wider mb-1">⏸ Exit Conditions</div>
+            <div className="flex flex-wrap gap-1.5">
+              {s.params.exitConditions.map((c, ci) => (
+                <span key={ci} className="px-2 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
+                  {c.feature} [{c.buckets.map((b) => `Q${b}`).join("/")}]
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Params row */}
       <div className="flex flex-wrap gap-3 text-[11px] text-binance-muted">
-        <span>TP: <span className="text-white font-mono">{s.params.tpAtr}×ATR</span></span>
-        <span>SL: <span className="text-white font-mono">{s.params.slAtr}×ATR</span></span>
-        <span>Hold: <span className="text-white font-mono">{s.params.maxHold}b</span></span>
-        <span>Cooldown: <span className="text-white font-mono">{s.params.cooldown}b</span></span>
         <span>Side: <span className="text-white font-mono capitalize">{s.params.side}</span></span>
+        <span>Exit: <span className="text-white font-mono">{s.params.exitMode}</span></span>
+        <span>Cooldown: <span className="text-white font-mono">{s.params.cooldown}b</span></span>
+        {s.params.side === "both" && s.params.exitMode === "signal-flip" && (
+          <span>Flip: <span className="text-white font-mono">{s.params.flipOnSignal ? "yes" : "no"}</span></span>
+        )}
       </div>
 
       {/* Saved-time stats hint */}
@@ -434,14 +465,24 @@ export default function StrategiesPanel({ bars, onOpenInBuilder, refreshKey }: P
                   <p className="text-[11px] text-binance-muted line-clamp-2 mt-1">{s.description}</p>
                 )}
                 <div className="mt-2 flex flex-wrap gap-1">
-                  {s.params.conditions.slice(0, 3).map((c, ci) => (
-                    <span key={ci} className="px-1.5 py-0.5 bg-binance-border text-white text-[9px] rounded font-mono">
-                      {c.feature} {c.buckets.map((b) => `Q${b}`).join("/")}
+                  {s.params.bullConditions.length > 0 && (
+                    <span className="px-1.5 py-0.5 bg-binance-green/20 text-binance-green text-[9px] rounded font-mono font-semibold">
+                      🟢 {s.params.bullConditions.length}
                     </span>
-                  ))}
-                  {s.params.conditions.length > 3 && (
-                    <span className="text-[9px] text-binance-muted self-center">+{s.params.conditions.length - 3}</span>
                   )}
+                  {s.params.bearConditions.length > 0 && (
+                    <span className="px-1.5 py-0.5 bg-binance-red/20 text-binance-red text-[9px] rounded font-mono font-semibold">
+                      🔴 {s.params.bearConditions.length}
+                    </span>
+                  )}
+                  {s.params.exitMode === "explicit" && s.params.exitConditions.length > 0 && (
+                    <span className="px-1.5 py-0.5 bg-binance-yellow/20 text-binance-yellow text-[9px] rounded font-mono font-semibold">
+                      ⏸ {s.params.exitConditions.length}
+                    </span>
+                  )}
+                  <span className="px-1.5 py-0.5 bg-binance-border text-white text-[9px] rounded font-mono capitalize">
+                    {s.params.side}
+                  </span>
                 </div>
                 <div className="mt-2 flex items-center justify-between text-[10px] text-binance-muted">
                   <span>{fmtDate(s.updatedAt)}</span>

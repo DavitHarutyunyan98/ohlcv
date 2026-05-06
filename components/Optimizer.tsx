@@ -2,7 +2,8 @@
 
 import { useState, useRef, useCallback, useMemo } from "react";
 import type { EnrichedBar } from "@/lib/types";
-import type { BacktestParams, Trade } from "@/lib/backtest";
+import type { BacktestParams, Trade, Condition } from "@/lib/backtest";
+import { FEATURES } from "@/lib/analysis";
 import { downloadXlsx } from "@/lib/downloadXlsx";
 import * as Strategies from "@/lib/strategies";
 import {
@@ -44,15 +45,20 @@ function pfColor(pf: number): string {
   return "rgba(239,68,68,0.30)";
 }
 
-function paramsFromCandidate(c: OptimCandidate): BacktestParams {
-  return {
-    conditions: c.conditions,
-    side:       c.side,
-    tpAtr:      c.tpAtr,
-    slAtr:      c.slAtr,
-    maxHold:    c.maxHold,
-    cooldown:   c.cooldown,
-  };
+function condChips(conds: Condition[]) {
+  if (conds.length === 0) return <span className="text-[10px] text-binance-muted italic">none</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {conds.map((c, i) => {
+        const feat = FEATURES.find((f) => f.key === c.feature)?.label ?? c.feature;
+        return (
+          <span key={i} className="px-1.5 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
+            {feat} [{c.buckets.map((b) => `Q${b}`).join("/")}]
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function exportTrades(cand: OptimCandidate) {
@@ -69,7 +75,6 @@ function exportTrades(cand: OptimCandidate) {
     "P&L %":        t.pnlPct.toFixed(4),
     "Exit Reason":  t.exitReason,
     "Hold (bars)":  t.durationBars,
-    "ATR @ entry":  t.atrAtEntry.toFixed(6),
   }));
   const safe = cand.label.replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 60) || "candidate";
   downloadXlsx(rows, `optimizer_trades_${safe}`);
@@ -160,7 +165,7 @@ function TradeLog({ trades }: { trades: Trade[] }) {
             {slice.map((t, i) => {
               const idx = (page - 1) * PAGE + i + 1;
               const isWin = t.pnlPct > 0;
-              const reason = t.exitReason === "tp" ? "✓ TP" : t.exitReason === "sl" ? "✗ SL" : "⏱";
+              const reason = t.exitReason === "signal" ? "🔄" : t.exitReason === "explicit" ? "⏸" : "⏹";
               return (
                 <tr key={i} className="border-b border-binance-border/30 hover:bg-binance-border/10 transition">
                   <td className="px-2 py-1 text-binance-muted">{idx}</td>
@@ -177,9 +182,7 @@ function TradeLog({ trades }: { trades: Trade[] }) {
                   <td className={`px-2 py-1 text-right font-mono font-bold ${isWin ? "text-binance-green" : "text-binance-red"}`}>
                     {t.pnlPct >= 0 ? "+" : ""}{t.pnlPct.toFixed(3)}%
                   </td>
-                  <td className={`px-2 py-1 text-center font-semibold ${
-                    t.exitReason === "tp" ? "text-binance-green" : t.exitReason === "sl" ? "text-binance-red" : "text-binance-muted"
-                  }`}>{reason}</td>
+                  <td className="px-2 py-1 text-center">{reason}</td>
                   <td className="px-2 py-1 text-right text-binance-muted">{t.durationBars}b</td>
                 </tr>
               );
@@ -225,7 +228,7 @@ function LBRow({ cand, rank, metric, onLoad, onSave }: {
             {rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : `#${rank}`}
           </span>
         </td>
-        <td className="px-3 py-2 text-xs text-white max-w-[280px]">
+        <td className="px-3 py-2 text-xs text-white max-w-[320px]">
           <span className="line-clamp-1 block">{cand.label}</span>
         </td>
         <td className="px-3 py-2 text-center font-mono text-xs font-bold" style={{ color }}>{fmt(cand.score, 3)}</td>
@@ -257,12 +260,13 @@ function LBRow({ cand, rank, metric, onLoad, onSave }: {
       {expanded && (
         <tr className="bg-binance-dark/50 border-b border-binance-border/25">
           <td colSpan={8} className="px-4 py-3">
-            <div className="flex flex-wrap gap-4 text-[11px]">
-              <span className="text-binance-muted">TP: <span className="text-white font-mono">{cand.tpAtr}×ATR</span></span>
-              <span className="text-binance-muted">SL: <span className="text-white font-mono">{cand.slAtr}×ATR</span></span>
-              <span className="text-binance-muted">Hold: <span className="text-white font-mono">{cand.maxHold}b</span></span>
-              <span className="text-binance-muted">Cooldown: <span className="text-white font-mono">{cand.cooldown}b</span></span>
-              <span className="text-binance-muted">Side: <span className="text-white font-mono capitalize">{cand.side}</span></span>
+            <div className="flex flex-wrap gap-4 text-[11px] mb-2">
+              <span className="text-binance-muted">Side: <span className="text-white font-mono capitalize">{cand.params.side}</span></span>
+              <span className="text-binance-muted">Exit: <span className="text-white font-mono">{cand.params.exitMode}</span></span>
+              <span className="text-binance-muted">Cooldown: <span className="text-white font-mono">{cand.params.cooldown}b</span></span>
+              {cand.params.side === "both" && cand.params.exitMode === "signal-flip" && (
+                <span className="text-binance-muted">Flip: <span className="text-white font-mono">{cand.params.flipOnSignal ? "yes" : "no"}</span></span>
+              )}
               <span className="text-binance-muted">Sharpe: <span className="text-white font-mono">{fmt(cand.sharpe)}</span></span>
               <span className="text-binance-muted">Max DD: <span className="text-binance-red font-mono">{fmt(cand.maxDD)}%</span></span>
               <span className="text-binance-muted">
@@ -272,15 +276,24 @@ function LBRow({ cand, rank, metric, onLoad, onSave }: {
                 </span>
               </span>
             </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {cand.conditions.map((c, ci) => (
-                <span key={ci} className="px-2 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
-                  {c.feature} [{c.buckets.map((b) => `Q${b}`).join("/")}]
-                </span>
-              ))}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-2">
+              <div>
+                <div className="text-[10px] text-binance-green uppercase tracking-wider mb-1">🟢 Bull Conditions</div>
+                {condChips(cand.params.bullConditions)}
+              </div>
+              <div>
+                <div className="text-[10px] text-binance-red uppercase tracking-wider mb-1">🔴 Bear Conditions</div>
+                {condChips(cand.params.bearConditions)}
+              </div>
+              {cand.params.exitMode === "explicit" && cand.params.exitConditions.length > 0 && (
+                <div className="md:col-span-2">
+                  <div className="text-[10px] text-binance-yellow uppercase tracking-wider mb-1">⏸ Exit Conditions</div>
+                  {condChips(cand.params.exitConditions)}
+                </div>
+              )}
             </div>
 
-            {/* Trade log */}
             <div className="mt-3">
               <div className="flex items-center gap-3 mb-1">
                 <span className="text-[11px] font-semibold text-white uppercase tracking-wider">📋 Trades</span>
@@ -381,7 +394,7 @@ function SaveModal({ cand, defaultInterval, defaultSymbol, onClose, onSaved }: {
     const s = Strategies.saveNew({
       name,
       description: desc,
-      params:      paramsFromCandidate(cand),
+      params:      cand.params,
       source:      "optimizer",
       lastStats:   cand.fullStats ?? {
         totalTrades: cand.trades, winRate: cand.winRate, profitFactor: cand.profitFactor,
@@ -413,9 +426,8 @@ function SaveModal({ cand, defaultInterval, defaultSymbol, onClose, onSaved }: {
         />
 
         <div className="text-[11px] text-binance-muted bg-binance-dark border border-binance-border rounded p-2 space-y-0.5 mb-4">
-          <p>Conditions: <span className="text-white">{cand.conditions.length}</span></p>
-          <p>TP/SL/Hold: <span className="text-white">{cand.tpAtr}/{cand.slAtr}×ATR · {cand.maxHold}b</span></p>
-          <p>Side: <span className="text-white capitalize">{cand.side}</span> · Cooldown: <span className="text-white">{cand.cooldown}b</span></p>
+          <p>Side: <span className="text-white capitalize">{cand.params.side}</span> · Exit: <span className="text-white">{cand.params.exitMode}</span></p>
+          <p>Bull: <span className="text-white">{cand.params.bullConditions.length}</span> · Bear: <span className="text-white">{cand.params.bearConditions.length}</span> · Cooldown: <span className="text-white">{cand.params.cooldown}b</span></p>
         </div>
 
         <div className="flex gap-2 justify-end">
@@ -443,17 +455,15 @@ interface Props {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBuilder, onSaved }: Props) {
-  // ── Config state (entry-condition optimizer; exits are FIXED) ────────────
-  const [metric,      setMetric]      = useState<OptimMetric>("profitFactor");
-  const [direction,   setDirection]   = useState<"long" | "short" | "both">("long");
-  const [minTrades,   setMinTrades]   = useState(10);
-  const [topFeatures, setTopFeatures] = useState(3);
-  const [tpAtr,       setTpAtr]       = useState(1.5);
-  const [slAtr,       setSlAtr]       = useState(1.0);
-  const [maxHold,     setMaxHold]     = useState(20);
-  const [cooldown,    setCooldown]    = useState(3);
+  // Config
+  const [metric,       setMetric]       = useState<OptimMetric>("profitFactor");
+  const [direction,    setDirection]    = useState<"long" | "short" | "both">("long");
+  const [minTrades,    setMinTrades]    = useState(10);
+  const [topFeatures,  setTopFeatures]  = useState(3);
+  const [cooldown,     setCooldown]     = useState(3);
+  const [flipOnSignal, setFlipOnSignal] = useState(false);
 
-  // Date range (dropdowns) - default to whole data range
+  // Date range
   const dataRange = useMemo(() => {
     if (bars.length === 0) return { min: "", max: "" };
     let lo = bars[0].openTime, hi = bars[0].openTime;
@@ -464,7 +474,7 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
   const [startDate, setStartDate] = useState("");
   const [endDate,   setEndDate]   = useState("");
 
-  // ── Run state ────────────────────────────────────────────────────────────
+  // Run state
   const [running,  setRunning]  = useState(false);
   const [progress, setProgress] = useState<OptimProgress | null>(null);
   const [result,   setResult]   = useState<OptimResult | null>(null);
@@ -472,7 +482,7 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const cancelRef = useRef({ cancelled: false });
 
-  // ── Run / Stop ────────────────────────────────────────────────────────────
+  // Run / Stop
   const handleStart = useCallback(async () => {
     if (bars.length < 50) return;
     setRunning(true);
@@ -485,25 +495,22 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
       side:        direction,
       minTrades,
       topFeatures,
-      tpAtr,
-      slAtr,
-      maxHold,
       cooldown,
-      startTime: startDate ? new Date(startDate).getTime() : undefined,
-      endTime:   endDate   ? new Date(endDate + "T23:59:59").getTime() : undefined,
+      flipOnSignal,
+      startTime:   startDate ? new Date(startDate).getTime() : undefined,
+      endTime:     endDate   ? new Date(endDate + "T23:59:59").getTime() : undefined,
     };
 
     const res = await runOptimization(bars, config, (p) => setProgress({ ...p }), cancelRef.current);
     setResult(res);
     setRunning(false);
-  }, [bars, metric, direction, minTrades, topFeatures, tpAtr, slAtr, maxHold, cooldown, startDate, endDate]);
+  }, [bars, metric, direction, minTrades, topFeatures, cooldown, flipOnSignal, startDate, endDate]);
 
   const handleStop = () => { cancelRef.current.cancelled = true; };
 
-  // ── Load best into builder ────────────────────────────────────────────────
   const handleLoad = useCallback((cand: OptimCandidate) => {
     if (!onLoadToBuilder) return;
-    onLoadToBuilder(paramsFromCandidate(cand));
+    onLoadToBuilder(cand.params);
   }, [onLoadToBuilder]);
 
   const handleSavedFromModal = (id: string) => {
@@ -515,29 +522,27 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
 
   const top5       = result ? result.candidates.slice(0, 5) : [];
   const topResults = progress?.topResults ?? [];
-
   const symbolCount = useMemo(() => new Set(bars.map((b) => b.symbol)).size, [bars]);
-  const estCombos   = 26 + (Math.pow(2, topFeatures) - 1) + 5 * symbolCount + 10;
+  // Phase 1 (FEATURES * 4) + phase 2 (worst case 2^topFeatures squared) + phase 3 + phase 4
+  const estCombos   = FEATURES.length * 4 + Math.pow(2, topFeatures + 1) + 5 * symbolCount + 10;
 
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="p-4 space-y-5 relative">
 
-      {/* ══ CONFIG PANEL ══════════════════════════════════════════════════════ */}
+      {/* CONFIG PANEL */}
       {!running && !result && (
         <div className="bg-binance-dark border border-binance-border rounded-xl p-4 space-y-4">
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             ⚙️ Optimization Config
             <span className="text-[10px] font-normal text-binance-muted bg-binance-border px-1.5 py-0.5 rounded">
-              entry-conditions only
+              entry-conditions only · signal-flip exits
             </span>
           </h3>
           <p className="text-[11px] text-binance-muted -mt-2">
-            The optimizer searches features × buckets. Exit parameters (TP/SL/Hold/Cooldown) stay fixed at the values you set
-            below — tune those in the Strategy Builder once you&apos;ve found a winning entry combo.
+            The optimizer searches feature × bucket combinations for both bullish and bearish edges, then combines them.
+            Exits use signal flip (a bear signal closes a long, etc.). Tune cooldown / flip behaviour below — TP/SL/maxHold no longer exist.
           </p>
 
-          {/* Row 1: Metric + Direction + Min trades + Top features */}
           <div className="flex flex-wrap gap-4">
             <div className="flex flex-col gap-1 min-w-[160px]">
               <label className="text-[11px] text-binance-muted uppercase tracking-wider">Optimize for</label>
@@ -553,7 +558,7 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
             </div>
 
             <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-binance-muted uppercase tracking-wider">Direction</label>
+              <label className="text-[11px] text-binance-muted uppercase tracking-wider">Side</label>
               <div className="flex gap-1">
                 {(["long", "short", "both"] as const).map((d) => (
                   <button
@@ -587,72 +592,67 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
                 onChange={(e) => setTopFeatures(+e.target.value)}
                 className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none"
               >
-                {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n} features</option>)}
+                {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n} per side</option>)}
               </select>
             </div>
-          </div>
 
-          {/* Row 2: Date range */}
-          <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-binance-muted uppercase tracking-wider">Date range (optional)</label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="date"
-                  min={dataRange.min || undefined}
-                  max={endDate || dataRange.max || undefined}
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none [color-scheme:dark]"
-                />
-                <span className="text-binance-muted text-xs">→</span>
-                <input
-                  type="date"
-                  min={startDate || dataRange.min || undefined}
-                  max={dataRange.max || undefined}
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none [color-scheme:dark]"
-                />
-                {(startDate || endDate) && (
-                  <button
-                    onClick={() => { setStartDate(""); setEndDate(""); }}
-                    className="text-binance-muted hover:text-binance-red transition text-xs px-1"
-                  >✕</button>
-                )}
-              </div>
-              <p className="text-[10px] text-binance-muted">
-                {bars.length > 0
-                  ? `Available: ${dataRange.min} → ${dataRange.max} (${bars.length.toLocaleString()} bars)`
-                  : "No data loaded"}
-                {(startDate || endDate) && " — slicing"}
-              </p>
+              <label className="text-[11px] text-binance-muted uppercase tracking-wider">Cooldown (bars)</label>
+              <input
+                type="number" min={0} max={50} value={cooldown}
+                onChange={(e) => setCooldown(Math.max(0, +e.target.value))}
+                className="w-20 bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none"
+              />
             </div>
           </div>
 
-          {/* Row 3: Fixed exit params */}
-          <div>
-            <label className="block text-[11px] text-binance-muted uppercase tracking-wider mb-1.5">Fixed Exit Parameters</label>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-[640px]">
-              {[
-                { label: "TP (×ATR)", value: tpAtr,    set: setTpAtr,    min: 0.1, step: 0.1 },
-                { label: "SL (×ATR)", value: slAtr,    set: setSlAtr,    min: 0.1, step: 0.1 },
-                { label: "Max Hold (bars)", value: maxHold, set: setMaxHold, min: 1, step: 1 },
-                { label: "Cooldown (bars)", value: cooldown, set: setCooldown, min: 1, step: 1 },
-              ].map(({ label, value, set, min, step }) => (
-                <div key={label} className="flex flex-col gap-1">
-                  <span className="text-[10px] text-binance-muted">{label}</span>
-                  <input
-                    type="number" min={min} step={step} value={value}
-                    onChange={(e) => set(parseFloat(e.target.value) || min)}
-                    className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none focus:border-binance-yellow"
-                  />
-                </div>
-              ))}
+          {/* Flip-on-signal (only when side=both) */}
+          {direction === "both" && (
+            <label className="inline-flex items-center gap-2 px-2.5 py-1.5 bg-binance-dark border border-binance-border rounded cursor-pointer">
+              <input
+                type="checkbox"
+                checked={flipOnSignal}
+                onChange={(e) => setFlipOnSignal(e.target.checked)}
+                className="accent-binance-yellow"
+              />
+              <span className="text-[11px] text-white">Flip position on counter-signal</span>
+              <span className="text-[10px] text-binance-muted ml-1">(always-in-market)</span>
+            </label>
+          )}
+
+          {/* Date range */}
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-binance-muted uppercase tracking-wider">Date range (optional)</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                min={dataRange.min || undefined}
+                max={endDate || dataRange.max || undefined}
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none [color-scheme:dark]"
+              />
+              <span className="text-binance-muted text-xs">→</span>
+              <input
+                type="date"
+                min={startDate || dataRange.min || undefined}
+                max={dataRange.max || undefined}
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none [color-scheme:dark]"
+              />
+              {(startDate || endDate) && (
+                <button
+                  onClick={() => { setStartDate(""); setEndDate(""); }}
+                  className="text-binance-muted hover:text-binance-red transition text-xs px-1"
+                >✕</button>
+              )}
             </div>
-            <p className="text-[10px] text-binance-muted mt-1.5">
-              R:R = <span className="text-white font-semibold">{(tpAtr / slAtr).toFixed(2)}</span> ·
-              {" "}Min win rate to break even: <span className="text-white font-semibold">{(slAtr / (tpAtr + slAtr) * 100).toFixed(1)}%</span>
+            <p className="text-[10px] text-binance-muted">
+              {bars.length > 0
+                ? `Available: ${dataRange.min} → ${dataRange.max} (${bars.length.toLocaleString()} bars)`
+                : "No data loaded"}
+              {(startDate || endDate) && " — slicing"}
             </p>
           </div>
 
@@ -672,10 +672,9 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
         </div>
       )}
 
-      {/* ══ RUNNING / DONE UI ════════════════════════════════════════════════ */}
+      {/* RUNNING / DONE UI */}
       {(running || result) && (
         <>
-          {/* Header strip */}
           <div className="flex items-center gap-4 flex-wrap">
             {running ? (
               <div className="flex items-center gap-2">
@@ -784,20 +783,24 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
             </div>
           )}
 
-          {/* Best-strategy summary card (final) */}
+          {/* Best strategy summary */}
           {result && top5.length > 0 && (
             <>
               <div className="bg-gradient-to-br from-[#1a1f10] to-[#111] border border-green-500/30 rounded-xl p-4 shadow-[0_0_20px_rgba(34,197,94,0.08)]">
                 <div className="flex items-start justify-between gap-4 flex-wrap">
-                  <div>
+                  <div className="flex-1 min-w-0">
                     <div className="text-[10px] text-binance-muted uppercase tracking-wider mb-1">🥇 Best Strategy Found · Best Params</div>
                     <div className="text-sm font-bold text-white mb-2 leading-snug">{top5[0].label}</div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {top5[0].conditions.map((c, ci) => (
-                        <span key={ci} className="px-2 py-0.5 bg-binance-border text-white text-[10px] rounded font-mono">
-                          {c.feature} [{c.buckets.map((b) => `Q${b}`).join("/")}]
-                        </span>
-                      ))}
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-[10px] text-binance-green uppercase tracking-wider mb-1">🟢 Bull</div>
+                        {condChips(top5[0].params.bullConditions)}
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-binance-red uppercase tracking-wider mb-1">🔴 Bear</div>
+                        {condChips(top5[0].params.bearConditions)}
+                      </div>
                     </div>
                   </div>
 
@@ -819,7 +822,6 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
                   </div>
                 </div>
 
-                {/* Stats grid */}
                 <div className="mt-4 grid grid-cols-3 sm:grid-cols-6 gap-2">
                   {[
                     { label: "Trades",     value: String(top5[0].trades) },
@@ -837,14 +839,12 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-4 text-[11px] text-binance-muted">
-                  <span>TP: <span className="text-white font-mono">{top5[0].tpAtr}×ATR</span></span>
-                  <span>SL: <span className="text-white font-mono">{top5[0].slAtr}×ATR</span></span>
-                  <span>Max Hold: <span className="text-white font-mono">{top5[0].maxHold} bars</span></span>
-                  <span>Cooldown: <span className="text-white font-mono">{top5[0].cooldown} bars</span></span>
-                  <span>Direction: <span className={`font-mono font-semibold ${
-                    top5[0].side === "long" ? "text-binance-green" :
-                    top5[0].side === "short" ? "text-binance-red" : "text-purple-300"
-                  }`}>{top5[0].side}</span></span>
+                  <span>Side: <span className="text-white font-mono capitalize">{top5[0].params.side}</span></span>
+                  <span>Exit: <span className="text-white font-mono">{top5[0].params.exitMode}</span></span>
+                  <span>Cooldown: <span className="text-white font-mono">{top5[0].params.cooldown}b</span></span>
+                  {top5[0].params.side === "both" && top5[0].params.exitMode === "signal-flip" && (
+                    <span>Flip: <span className="text-white font-mono">{top5[0].params.flipOnSignal ? "yes" : "no"}</span></span>
+                  )}
                 </div>
               </div>
 

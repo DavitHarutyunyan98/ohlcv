@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useCallback } from "react";
-import type { AnalysisResult, FreqRow, CorrRow, FwdHorizon, EnrichedBar } from "@/lib/types";
+import type { AnalysisResult, FreqRow, CorrRow, FwdHorizon, EnrichedBar, Kline } from "@/lib/types";
 import { FWD_HORIZONS } from "@/lib/types";
 import { downloadXlsx } from "@/lib/downloadXlsx";
 import type { BacktestParams } from "@/lib/backtest";
@@ -55,13 +55,15 @@ function fmt2(n: number | null): string {
 interface Props {
   result:    AnalysisResult;
   bars:      EnrichedBar[];
+  /** Raw klines for the focal symbol — enables the Trades-Chart tab. Optional. */
+  klines?:   Kline[];
   symbol?:   string;
   interval?: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function AnalysisPanel({ result, bars, symbol = "", interval = "" }: Props) {
+export default function AnalysisPanel({ result, bars, klines = [], symbol = "", interval = "" }: Props) {
   const [activeTab,       setActiveTab]       = useState<"freq" | "corr" | "strategy" | "optimize" | "strategies">("freq");
   const [builderParams,   setBuilderParams]   = useState<BacktestParams | undefined>(undefined);
   const [horizon,         setHorizon]         = useState<FwdHorizon>(1);
@@ -390,6 +392,7 @@ export default function AnalysisPanel({ result, bars, symbol = "", interval = ""
       {activeTab === "strategy" && (
         <StrategyBuilder
           bars={bars}
+          klines={klines}
           initialParams={builderParams}
           symbol={symbol}
           interval={interval}
