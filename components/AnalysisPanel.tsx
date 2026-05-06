@@ -7,6 +7,7 @@ import { downloadXlsx } from "@/lib/downloadXlsx";
 import type { BacktestParams } from "@/lib/backtest";
 import StrategyBuilder from "./StrategyBuilder";
 import Optimizer from "./Optimizer";
+import StrategiesPanel from "./StrategiesPanel";
 
 // ─── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -61,12 +62,25 @@ interface Props {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function AnalysisPanel({ result, bars, symbol = "", interval = "" }: Props) {
-  const [activeTab,       setActiveTab]       = useState<"freq" | "corr" | "strategy" | "optimize">("freq");
+  const [activeTab,       setActiveTab]       = useState<"freq" | "corr" | "strategy" | "optimize" | "strategies">("freq");
   const [builderParams,   setBuilderParams]   = useState<BacktestParams | undefined>(undefined);
   const [horizon,         setHorizon]         = useState<FwdHorizon>(1);
+  // Bumped whenever a strategy is saved anywhere — forces StrategiesPanel to refresh
+  const [strategiesTick,  setStrategiesTick]  = useState(0);
 
   // Called by Optimizer → switches to Strategy Builder tab with winning params pre-loaded
   const handleLoadToBuilder = useCallback((params: BacktestParams) => {
+    setBuilderParams(params);
+    setActiveTab("strategy");
+  }, []);
+
+  // Called by Optimizer / Builder when a strategy is saved → bump tick
+  const handleStrategySaved = useCallback(() => {
+    setStrategiesTick((t) => t + 1);
+  }, []);
+
+  // Called from StrategiesPanel when user clicks "Open in Builder"
+  const handleOpenInBuilder = useCallback((params: BacktestParams) => {
     setBuilderParams(params);
     setActiveTab("strategy");
   }, []);
@@ -166,22 +180,24 @@ export default function AnalysisPanel({ result, bars, symbol = "", interval = ""
 
       {/* ── Tabs ───────────────────────────────────────────────────────── */}
       <div className="flex border-b border-binance-border overflow-x-auto">
-        {(["freq", "corr", "strategy", "optimize"] as const).map((t) => (
+        {(["freq", "corr", "strategy", "optimize", "strategies"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
             className={`px-5 py-2.5 text-xs font-semibold uppercase tracking-wider transition border-b-2 whitespace-nowrap ${
               activeTab === t
-                ? t === "strategy"  ? "border-purple-400   text-purple-400"
-                : t === "optimize"  ? "border-orange-400   text-orange-400"
-                :                    "border-binance-yellow text-binance-yellow"
+                ? t === "strategy"   ? "border-purple-400   text-purple-400"
+                : t === "optimize"   ? "border-orange-400   text-orange-400"
+                : t === "strategies" ? "border-binance-yellow text-binance-yellow"
+                :                      "border-binance-yellow text-binance-yellow"
                 : "border-transparent text-binance-muted hover:text-white"
             }`}
           >
-            {t === "freq"     ? "📊 Frequency Table"
-           : t === "corr"     ? "🌡 Correlation Matrix"
-           : t === "strategy" ? "🎯 Strategy Builder"
-           :                    "⚡ Optimize"}
+            {t === "freq"       ? "📊 Frequency Table"
+           : t === "corr"       ? "🌡 Correlation Matrix"
+           : t === "strategy"   ? "🎯 Strategy Builder"
+           : t === "optimize"   ? "⚡ Optimize"
+           :                      "💼 My Strategies"}
           </button>
         ))}
       </div>
@@ -372,12 +388,33 @@ export default function AnalysisPanel({ result, bars, symbol = "", interval = ""
 
       {/* ══ STRATEGY BUILDER ═══════════════════════════════════════════════ */}
       {activeTab === "strategy" && (
-        <StrategyBuilder bars={bars} initialParams={builderParams} />
+        <StrategyBuilder
+          bars={bars}
+          initialParams={builderParams}
+          symbol={symbol}
+          interval={interval}
+          onSaved={handleStrategySaved}
+        />
       )}
 
       {/* ══ OPTIMIZER ══════════════════════════════════════════════════════ */}
       {activeTab === "optimize" && (
-        <Optimizer bars={bars} onLoadToBuilder={handleLoadToBuilder} />
+        <Optimizer
+          bars={bars}
+          symbol={symbol}
+          interval={interval}
+          onLoadToBuilder={handleLoadToBuilder}
+          onSaved={handleStrategySaved}
+        />
+      )}
+
+      {/* ══ MY STRATEGIES ══════════════════════════════════════════════════ */}
+      {activeTab === "strategies" && (
+        <StrategiesPanel
+          bars={bars}
+          onOpenInBuilder={handleOpenInBuilder}
+          refreshKey={strategiesTick}
+        />
       )}
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect } from "react";
 import type { EnrichedBar } from "@/lib/types";
 import { FEATURES } from "@/lib/analysis";
 import {
@@ -12,6 +12,7 @@ import {
   type Trade,
 } from "@/lib/backtest";
 import { downloadXlsx } from "@/lib/downloadXlsx";
+import * as Strategies from "@/lib/strategies";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -133,16 +134,62 @@ function Stat({ label, value, color = "text-white", sub }:
   );
 }
 
+// ─── Save modal ────────────────────────────────────────────────────────────────
+
+function SaveStrategyModal({ defaultName, defaultDesc, onClose, onConfirm }: {
+  defaultName: string;
+  defaultDesc: string;
+  onClose:     () => void;
+  onConfirm:   (name: string, desc: string) => void;
+}) {
+  const [name, setName] = useState(defaultName);
+  const [desc, setDesc] = useState(defaultDesc);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div className="bg-binance-card border border-binance-border rounded-xl p-5 w-[440px] max-w-[95vw]" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-bold text-white mb-3">💾 Save Strategy</h3>
+
+        <label className="text-[11px] text-binance-muted uppercase tracking-wider">Name</label>
+        <input
+          value={name} onChange={(e) => setName(e.target.value)} autoFocus
+          className="w-full mt-1 mb-3 bg-binance-dark border border-binance-border rounded px-2 py-1.5 text-sm text-white outline-none focus:border-binance-yellow"
+        />
+
+        <label className="text-[11px] text-binance-muted uppercase tracking-wider">Description</label>
+        <textarea
+          value={desc} onChange={(e) => setDesc(e.target.value)} rows={4}
+          className="w-full mt-1 mb-4 bg-binance-dark border border-binance-border rounded px-2 py-1.5 text-sm text-white outline-none focus:border-binance-yellow resize-y"
+        />
+
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs rounded bg-binance-border text-binance-text hover:bg-[#414d5c] transition">Cancel</button>
+          <button
+            onClick={() => onConfirm(name.trim() || defaultName, desc.trim())}
+            disabled={!name.trim()}
+            className="px-4 py-1.5 text-xs font-bold rounded bg-binance-yellow text-binance-dark hover:brightness-110 disabled:opacity-40 transition"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
   bars:           EnrichedBar[];
   initialParams?: BacktestParams;
+  symbol?:        string;
+  interval?:      string;
+  /** Called after a successful save so the parent can refresh the strategies tab. */
+  onSaved?:       (id: string) => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StrategyBuilder({ bars, initialParams }: Props) {
+export default function StrategyBuilder({ bars, initialParams, symbol = "", interval = "", onSaved }: Props) {
   // ── Conditions ────────────────────────────────────────────────────────────
   const [conditions, setConditions] = useState<Condition[]>([
     { feature: "rsi14",        buckets: [1] },
@@ -175,6 +222,10 @@ export default function StrategyBuilder({ bars, initialParams }: Props) {
   const [tradeTab, setTradeTab] = useState<"stats" | "log">("stats");
   const [tradePage, setTradePage] = useState(1);
   const TRADE_PAGE_SIZE = 50;
+
+  // Save modal & toast
+  const [showSave, setShowSave] = useState(false);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
 
   // ── Condition helpers ─────────────────────────────────────────────────────
   const addCondition = () => {
@@ -225,6 +276,24 @@ export default function StrategyBuilder({ bars, initialParams }: Props) {
       }
     }, 16);
   }, [bars, conditions, side, tpAtr, slAtr, maxHold, cooldown]);
+
+  // ── Save current strategy ─────────────────────────────────────────────────
+  const handleSaveStrategy = useCallback((name: string, description: string) => {
+    const params: BacktestParams = { conditions, side, tpAtr, slAtr, maxHold, cooldown };
+    const s = Strategies.saveNew({
+      name,
+      description,
+      params,
+      source:    "builder",
+      lastStats: result?.stats ?? null,
+      tunedOn:   symbol || undefined,
+      interval:  interval || undefined,
+    });
+    setShowSave(false);
+    setSavedToast(`Saved "${s.name}" ✓`);
+    setTimeout(() => setSavedToast(null), 2500);
+    onSaved?.(s.id);
+  }, [conditions, side, tpAtr, slAtr, maxHold, cooldown, result, symbol, interval, onSaved]);
 
   // ── Export trades ─────────────────────────────────────────────────────────
   const handleExport = () => {
@@ -397,6 +466,15 @@ export default function StrategyBuilder({ bars, initialParams }: Props) {
                 <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/>
               </svg>Running…</>
             ) : "▶ Run Backtest"}
+          </button>
+
+          {/* Save Strategy button */}
+          <button
+            onClick={() => setShowSave(true)}
+            disabled={conditions.length === 0}
+            className="w-full py-2 bg-binance-yellow/20 hover:bg-binance-yellow text-binance-yellow hover:text-binance-dark border border-binance-yellow/50 disabled:opacity-40 text-xs font-bold rounded-lg transition flex items-center justify-center gap-2"
+          >
+            💾 Save as Strategy
           </button>
 
           {bars.length === 0 && (
@@ -599,6 +677,34 @@ export default function StrategyBuilder({ bars, initialParams }: Props) {
           )}
         </div>
       </div>
+
+      {/* Save modal */}
+      {showSave && (
+        <SaveStrategyModal
+          defaultName={
+            conditions.length > 0
+              ? `${conditions[0].feature} Q${conditions[0].buckets.join("/")}${conditions.length > 1 ? ` +${conditions.length - 1}` : ""} ${side}`
+              : "My Strategy"
+          }
+          defaultDesc={
+            result
+              ? `Backtested on ${symbol || "loaded data"}${interval ? ` · ${interval}` : ""}. ` +
+                `Trades=${result.stats.totalTrades}, WR=${(result.stats.winRate*100).toFixed(1)}%, ` +
+                `PF=${isFinite(result.stats.profitFactor) ? result.stats.profitFactor.toFixed(2) : "∞"}, ` +
+                `Total=${result.stats.totalReturnPct.toFixed(2)}%.`
+              : `Built in Strategy Builder${symbol ? ` for ${symbol}` : ""}${interval ? ` · ${interval}` : ""}.`
+          }
+          onClose={() => setShowSave(false)}
+          onConfirm={handleSaveStrategy}
+        />
+      )}
+
+      {/* Toast */}
+      {savedToast && (
+        <div className="fixed bottom-6 right-6 z-50 px-4 py-2 bg-green-500/90 text-white text-sm font-semibold rounded-lg shadow-xl">
+          {savedToast}
+        </div>
+      )}
     </div>
   );
 }

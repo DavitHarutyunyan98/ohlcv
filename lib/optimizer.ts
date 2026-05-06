@@ -1,20 +1,27 @@
 /**
- * Strategy Optimization Engine
+ * Strategy Optimization Engine — entry-condition focus.
  *
- * Three-phase grid search:
- *   Phase 1 — Feature Scan:    Each feature × [Q1,Q5] with default exit params.
- *                               Identifies which features and directions have predictive power.
- *   Phase 2 — Parameter Grid:  Top N features combined (all non-empty subsets)
- *                               × full TP/SL/maxHold grid.
- *   Phase 3 — Per-pair:        Top 5 strategies run on each symbol individually.
+ * The user explicitly does NOT want TP / SL grid-searched (those are
+ * exit-side parameters and tuning them blindly produces overfit nonsense).
+ * Instead the optimizer:
  *
- * Speed trick: quintile bucket table is precomputed once (O(n) lookup per bar),
- * so condition-checking inside the inner loop is just an array read.
+ *   Phase 1 — Feature Scan:  each feature × {Q1, Q5} with the user's fixed
+ *                            TP / SL / Hold / Cooldown values.
+ *   Phase 2 — Combo Search:  every non-empty subset of the top-N features
+ *                            (max 4) using the same fixed exits.
+ *   Phase 3 — Per-pair scan: top 5 strategies replayed on each symbol
+ *                            individually for the heatmap.
+ *
+ * After scoring is done, the top 10 candidates are re-run through the
+ * full `runBacktest` so we have real Trade lists to display / export.
+ *
+ * Speed trick: quintile bucket table is precomputed once (O(n) lookup per
+ * bar), so condition-checking inside the inner loop is just an array read.
  */
 
 import type { EnrichedBar } from "./types";
 import { FEATURES } from "./analysis";
-import type { Condition } from "./backtest";
+import { runBacktest, type BacktestParams, type Condition, type Trade, type BacktestStats } from "./backtest";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -25,15 +32,24 @@ export type OptimMetric =
   | "sharpe"
   | "totalReturn";
 
+/**
+ * Optimization config.
+ *
+ * NOTE: tpAtr / slAtr / maxHold / cooldown are FIXED for the whole run.
+ * The optimizer searches only over entry conditions.
+ */
 export interface OptimConfig {
-  metric:        OptimMetric;
-  side:          "long" | "short" | "both";
-  minTrades:     number;
-  tpValues:      number[];
-  slValues:      number[];
-  maxHoldValues: number[];
-  cooldown:      number;
-  topFeatures:   number; // top N features to combine (max 4)
+  metric:      OptimMetric;
+  side:        "long" | "short" | "both";
+  minTrades:   number;
+  topFeatures: number;       // 1..4
+  tpAtr:       number;       // fixed exit
+  slAtr:       number;       // fixed exit
+  maxHold:     number;       // fixed exit
+  cooldown:    number;       // fixed entry gating
+  /** Optional date-range filter (epoch-ms). Bars outside are dropped before scoring. */
+  startTime?:  number;
+  endTime?:    number;
 }
 
 export interface OptimCandidate {
@@ -43,7 +59,8 @@ export interface OptimCandidate {
   tpAtr:        number;
   slAtr:        number;
   maxHold:      number;
-  side:         string;
+  cooldown:     number;
+  side:         "long" | "short" | "both";
   score:        number;
   trades:       number;
   winRate:      number;
@@ -52,6 +69,10 @@ export interface OptimCandidate {
   sharpe:       number;
   maxDD:        number;
   totalReturn:  number;
+  /** Only populated for the top N after a final full backtest pass. */
+  fullTrades?:  Trade[];
+  /** Full stats from the final pass (richer than the fast scan stats). */
+  fullStats?:   BacktestStats;
 }
 
 export interface PhaseInfo {
@@ -75,6 +96,8 @@ export interface OptimResult {
   candidates:  OptimCandidate[];
   perPair:     Record<string, OptimCandidate[]>;
   symbols:     string[];
+  /** Number of bars that survived the date filter, for UI display. */
+  filteredBars: number;
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -108,7 +131,7 @@ function buildBucketTable(bars: EnrichedBar[]): Map<string, Uint8Array> {
   return table;
 }
 
-/** All non-empty subsets of arr (length 1 to maxLen) */
+/** All non-empty subsets of arr (length 1..maxLen) */
 function subsets<T>(arr: T[], maxLen: number): T[][] {
   const result: T[][] = [];
   const n = arr.length;
@@ -137,7 +160,7 @@ function condLabel(conds: Condition[]): string {
   }).join(" + ");
 }
 
-// ─── Fast intrabar backtest ───────────────────────────────────────────────────
+// ─── Fast intrabar backtest (no trade list, just stats) ───────────────────────
 
 interface FastStats {
   trades: number; wins: number; losses: number;
@@ -165,7 +188,6 @@ function fastBacktest(
     const last = lastEntry.get(bar.symbol) ?? -Infinity;
     if (i - last < cooldown) continue;
 
-    // Check conditions using pre-computed bucket table
     let allMet = true;
     for (const cond of conditions) {
       const arr = bucketTable.get(cond.feature);
@@ -223,7 +245,8 @@ function fastBacktest(
 
 function makeCandidate(
   id: string, label: string,
-  conditions: Condition[], tpAtr: number, slAtr: number, maxHold: number, side: string,
+  conditions: Condition[], tpAtr: number, slAtr: number, maxHold: number, cooldown: number,
+  side: "long" | "short" | "both",
   fs: FastStats, metric: OptimMetric
 ): OptimCandidate {
   const winRate      = fs.trades > 0 ? fs.wins / fs.trades : 0;
@@ -236,7 +259,7 @@ function makeCandidate(
   const sharpe       = variance > 0 ? (mean / Math.sqrt(variance)) * Math.sqrt(Math.max(1, fs.trades)) : 0;
 
   const c: OptimCandidate = {
-    id, label, conditions, tpAtr, slAtr, maxHold, side,
+    id, label, conditions, tpAtr, slAtr, maxHold, cooldown, side,
     trades: fs.trades, winRate, profitFactor,
     expectancy: Math.round(expectancy * 10000) / 10000,
     sharpe:     Math.round(sharpe    * 100)   / 100,
@@ -253,35 +276,52 @@ function makeCandidate(
 const YIELD_EVERY = 15; // yield to UI every N backtests
 
 export async function runOptimization(
-  bars:      EnrichedBar[],
-  config:    OptimConfig,
+  bars:       EnrichedBar[],
+  config:     OptimConfig,
   onProgress: (p: OptimProgress) => void,
-  cancelRef: { cancelled: boolean }
+  cancelRef:  { cancelled: boolean }
 ): Promise<OptimResult> {
-  const { metric, side, minTrades, tpValues, slValues, maxHoldValues, cooldown, topFeatures } = config;
+  const { metric, side, minTrades, topFeatures, tpAtr, slAtr, maxHold, cooldown, startTime, endTime } = config;
+
+  // ── Date-range filter ─────────────────────────────────────────────────────
+  const filtered = bars.filter((b) => {
+    if (startTime !== undefined && b.openTime < startTime) return false;
+    if (endTime   !== undefined && b.openTime > endTime)   return false;
+    return true;
+  });
+
+  if (filtered.length < 50) {
+    return {
+      candidates: [],
+      perPair: {},
+      symbols: [],
+      filteredBars: filtered.length,
+    };
+  }
 
   // Precompute bucket table ONCE for all backtests
-  const bucketTable = buildBucketTable(bars);
+  const bucketTable = buildBucketTable(filtered);
 
   // Unique symbols
-  const symbolSet = new Set(bars.map((b) => b.symbol));
+  const symbolSet = new Set(filtered.map((b) => b.symbol));
   const symbols   = [...symbolSet];
   const symbolBars = new Map<string, EnrichedBar[]>();
-  for (const sym of symbols) symbolBars.set(sym, bars.filter((b) => b.symbol === sym));
+  for (const sym of symbols) symbolBars.set(sym, filtered.filter((b) => b.symbol === sym));
   const symBucketTables = new Map<string, Map<string, Uint8Array>>();
   for (const sym of symbols) symBucketTables.set(sym, buildBucketTable(symbolBars.get(sym)!));
 
   // ── Phase sizes ───────────────────────────────────────────────────────────
-  const p1Total   = FEATURES.length * 2; // each feature × [Q1, Q5]
+  const p1Total   = FEATURES.length * 2; // each feature × {Q1, Q5}
   const numCombos = Math.min(topFeatures, FEATURES.length);
-  // We'll know exact p2 count after phase 1; estimate conservatively
-  const p2Est     = (Math.pow(2, numCombos) - 1) * tpValues.length * slValues.length * maxHoldValues.length;
+  const p2Est     = (Math.pow(2, numCombos) - 1);
   const p3Est     = 5 * symbols.length;
+  const p4Est     = 10; // final full backtest on top 10
 
   const phases: PhaseInfo[] = [
-    { name: "Phase 1", desc: "Feature Scan — which features & buckets have edge", total: p1Total,  done: 0, status: "running" },
-    { name: "Phase 2", desc: "Parameter Grid — best condition combos × TP/SL/Hold", total: p2Est,   done: 0, status: "waiting" },
-    { name: "Phase 3", desc: "Per-pair — top strategies on each symbol separately",  total: p3Est,   done: 0, status: "waiting" },
+    { name: "Phase 1", desc: "Feature scan — which features & buckets show edge",      total: p1Total, done: 0, status: "running" },
+    { name: "Phase 2", desc: "Combo search — best subsets of top features",            total: p2Est,   done: 0, status: "waiting" },
+    { name: "Phase 3", desc: "Per-pair — replay top strategies on each symbol",        total: p3Est,   done: 0, status: "waiting" },
+    { name: "Phase 4", desc: "Trade capture — full backtest on top 10 for trade log",  total: p4Est,   done: 0, status: "waiting" },
   ];
 
   let totalDone  = 0;
@@ -302,15 +342,15 @@ export async function runOptimization(
 
   for (const feat of FEATURES) {
     for (const bucket of [1, 5] as const) {
-      if (cancelRef.cancelled) return { candidates: allResults, perPair: {}, symbols };
+      if (cancelRef.cancelled) return finalize(allResults, {}, symbols, filtered.length);
 
       const label = `${feat.label} Q${bucket}`;
-      const fs    = fastBacktest(bars, bucketTable, [{ feature: feat.key as string, buckets: [bucket] }],
-        side, 1.5, 1.0, 20, cooldown);
+      const fs    = fastBacktest(filtered, bucketTable, [{ feature: feat.key as string, buckets: [bucket] }],
+        side, tpAtr, slAtr, maxHold, cooldown);
 
       if (fs.trades >= minTrades) {
         const cand = makeCandidate(`p1-${feat.key}-q${bucket}`, label,
-          [{ feature: feat.key as string, buckets: [bucket] }], 1.5, 1.0, 20, side, fs, metric);
+          [{ feature: feat.key as string, buckets: [bucket] }], tpAtr, slAtr, maxHold, cooldown, side, fs, metric);
         allResults.push(cand);
         phase1Scores.push({ feature: feat.key as string, bucket, label, score: cand.score });
       }
@@ -344,34 +384,27 @@ export async function runOptimization(
   // Build condition subsets (all non-empty combinations up to topFeatures)
   const conditionSets = subsets(topConditions, numCombos);
 
-  // ══ PHASE 2 — param grid ══════════════════════════════════════════════════
-  const p2Total = conditionSets.length * tpValues.length * slValues.length * maxHoldValues.length;
-  phases[1].total = p2Total;
+  // ══ PHASE 2 — combo search (fixed exits) ══════════════════════════════════
+  phases[1].total = conditionSets.length;
 
   let p2Idx = 0;
   for (const conds of conditionSets) {
-    for (const tp of tpValues) {
-      for (const sl of slValues) {
-        for (const hold of maxHoldValues) {
-          if (cancelRef.cancelled) return { candidates: allResults, perPair: {}, symbols };
+    if (cancelRef.cancelled) return finalize(allResults, {}, symbols, filtered.length);
 
-          const label = `${condLabel(conds)} | TP:${tp} SL:${sl} Hold:${hold}`;
-          const fs    = fastBacktest(bars, bucketTable, conds, side, tp, sl, hold, cooldown);
+    const label = condLabel(conds);
+    const fs    = fastBacktest(filtered, bucketTable, conds, side, tpAtr, slAtr, maxHold, cooldown);
 
-          if (fs.trades >= minTrades) {
-            const id   = `p2-${p2Idx++}`;
-            const cand = makeCandidate(id, label, conds, tp, sl, hold, side, fs, metric);
-            allResults.push(cand);
-          }
-
-          phases[1].done++;
-          totalDone++;
-          batchCount++;
-
-          if (batchCount % YIELD_EVERY === 0) { emit(label); await yieldToUI(); }
-        }
-      }
+    if (fs.trades >= minTrades) {
+      const id   = `p2-${p2Idx++}`;
+      const cand = makeCandidate(id, label, conds, tpAtr, slAtr, maxHold, cooldown, side, fs, metric);
+      allResults.push(cand);
     }
+
+    phases[1].done++;
+    totalDone++;
+    batchCount++;
+
+    if (batchCount % YIELD_EVERY === 0) { emit(label); await yieldToUI(); }
   }
   phases[1].status = "done";
   phases[2].status = "running";
@@ -390,14 +423,14 @@ export async function runOptimization(
     perPair[sym]   = [];
 
     for (const strat of top5) {
-      if (cancelRef.cancelled) return { candidates: allResults, perPair, symbols };
+      if (cancelRef.cancelled) return finalize(allResults, perPair, symbols, filtered.length);
 
       const label = `${sym}: ${strat.label}`;
       const fs    = fastBacktest(symBars, symTable, strat.conditions, side,
         strat.tpAtr, strat.slAtr, strat.maxHold, cooldown);
 
       const cand = makeCandidate(`pp-${sym}-${strat.id}`, label,
-        strat.conditions, strat.tpAtr, strat.slAtr, strat.maxHold, sym, fs, metric);
+        strat.conditions, strat.tpAtr, strat.slAtr, strat.maxHold, cooldown, side, fs, metric);
       perPair[sym].push(cand);
 
       phases[2].done++;
@@ -407,16 +440,66 @@ export async function runOptimization(
     }
   }
   phases[2].status = "done";
+  phases[3].status = "running";
+  emit("Phase 3 complete");
+  await yieldToUI();
+
+  // ══ PHASE 4 — full trade capture on top 10 ════════════════════════════════
+  const sortedAll = [...allResults].sort((a, b) => b.score - a.score);
+  const top10     = sortedAll.slice(0, 10);
+  phases[3].total = top10.length;
+
+  for (const cand of top10) {
+    if (cancelRef.cancelled) break;
+
+    const params: BacktestParams = {
+      conditions: cand.conditions,
+      side:       cand.side,
+      tpAtr:      cand.tpAtr,
+      slAtr:      cand.slAtr,
+      maxHold:    cand.maxHold,
+      cooldown:   cand.cooldown,
+    };
+
+    try {
+      const r = runBacktest(filtered, params);
+      cand.fullTrades = r.trades;
+      cand.fullStats  = r.stats;
+    } catch {
+      // ignore — fast scan stats remain
+    }
+
+    phases[3].done++;
+    totalDone++;
+    batchCount++;
+    if (batchCount % 3 === 0) { emit(`Capturing trades · ${cand.label}`); await yieldToUI(); }
+  }
+  phases[3].status = "done";
 
   onProgress({
     phases, currentTest: "Done", done: true,
-    topResults: [...allResults].sort((a, b) => b.score - a.score).slice(0, 10),
+    topResults: sortedAll.slice(0, 10),
     totalDone, totalItems: totalDone,
   });
 
   return {
-    candidates: [...allResults].sort((a, b) => b.score - a.score),
+    candidates:  sortedAll,
     perPair,
     symbols,
+    filteredBars: filtered.length,
+  };
+}
+
+function finalize(
+  candidates: OptimCandidate[],
+  perPair:    Record<string, OptimCandidate[]>,
+  symbols:    string[],
+  filteredBars: number,
+): OptimResult {
+  return {
+    candidates: [...candidates].sort((a, b) => b.score - a.score),
+    perPair,
+    symbols,
+    filteredBars,
   };
 }
