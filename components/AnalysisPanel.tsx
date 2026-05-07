@@ -57,13 +57,15 @@ interface Props {
   bars:      EnrichedBar[];
   /** Raw klines for the focal symbol — enables the Trades-Chart tab. Optional. */
   klines?:   Kline[];
+  /** Map of symbol → klines, for per-pair chart support in Builder/Optimizer. */
+  symbolKlines?: Record<string, Kline[]>;
   symbol?:   string;
   interval?: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function AnalysisPanel({ result, bars, klines = [], symbol = "", interval = "" }: Props) {
+export default function AnalysisPanel({ result, bars, klines = [], symbolKlines = {}, symbol = "", interval = "" }: Props) {
   const [activeTab,       setActiveTab]       = useState<"freq" | "corr" | "strategy" | "optimize" | "strategies">("freq");
   const [builderParams,   setBuilderParams]   = useState<BacktestParams | undefined>(undefined);
   const [horizon,         setHorizon]         = useState<FwdHorizon>(1);
@@ -393,6 +395,7 @@ export default function AnalysisPanel({ result, bars, klines = [], symbol = "", 
         <StrategyBuilder
           bars={bars}
           klines={klines}
+          symbolKlines={symbolKlines}
           initialParams={builderParams}
           symbol={symbol}
           interval={interval}
@@ -404,6 +407,7 @@ export default function AnalysisPanel({ result, bars, klines = [], symbol = "", 
       {activeTab === "optimize" && (
         <Optimizer
           bars={bars}
+          symbolKlines={symbolKlines}
           symbol={symbol}
           interval={interval}
           onLoadToBuilder={handleLoadToBuilder}

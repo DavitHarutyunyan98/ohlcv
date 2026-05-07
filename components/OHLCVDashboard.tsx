@@ -691,6 +691,15 @@ export default function OHLCVDashboard() {
             result={analysisResult}
             bars={enrichedBars}
             klines={mode === "single" ? singleKlines : activeKlines}
+            symbolKlines={
+              mode === "single"
+                ? { [symbol]: singleKlines }
+                : Object.fromEntries(
+                    multiResults
+                      .filter((r) => r.status === "ok" && r.klines && r.klines.length > 0)
+                      .map((r) => [r.symbol, r.klines!])
+                  )
+            }
             symbol={mode === "single" ? symbol : (activePair || `${multiResults.filter((r) => r.status === "ok").length} pairs`)}
             interval={barLength}
           />

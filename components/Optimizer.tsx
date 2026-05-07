@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useRef, useCallback, useMemo } from "react";
-import type { EnrichedBar } from "@/lib/types";
+import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import type { EnrichedBar, Kline } from "@/lib/types";
 import type { BacktestParams, Trade, Condition } from "@/lib/backtest";
 import { FEATURES } from "@/lib/analysis";
 import { downloadXlsx } from "@/lib/downloadXlsx";
 import * as Strategies from "@/lib/strategies";
+import TradesChart from "./TradesChart";
 import {
   runOptimization,
   type OptimConfig,
@@ -446,6 +447,7 @@ function SaveModal({ cand, defaultInterval, defaultSymbol, onClose, onSaved }: {
 
 interface Props {
   bars:           EnrichedBar[];
+  symbolKlines?:  Record<string, Kline[]>;
   symbol?:        string;
   interval?:      string;
   onLoadToBuilder?: (params: BacktestParams) => void;
@@ -454,7 +456,7 @@ interface Props {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBuilder, onSaved }: Props) {
+export default function Optimizer({ bars, symbolKlines = {}, symbol = "", interval = "", onLoadToBuilder, onSaved }: Props) {
   // Config
   const [metric,       setMetric]       = useState<OptimMetric>("profitFactor");
   const [direction,    setDirection]    = useState<"long" | "short" | "both">("long");
@@ -474,20 +476,45 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
   const [startDate, setStartDate] = useState("");
   const [endDate,   setEndDate]   = useState("");
 
+  // Pair-mode scope
+  const allSymbols = useMemo(() => [...new Set(bars.map((b) => b.symbol))], [bars]);
+  const [pairMode,  setPairMode]  = useState<"single" | "all">(allSymbols.length > 1 ? "all" : "single");
+  const [chosenSym, setChosenSym] = useState<string>("");
+
+  useEffect(() => {
+    if (allSymbols.length === 0) { setChosenSym(""); return; }
+    if (!chosenSym || !allSymbols.includes(chosenSym)) setChosenSym(allSymbols[0]);
+  }, [allSymbols, chosenSym]);
+
+  useEffect(() => {
+    if (allSymbols.length <= 1 && pairMode === "all") setPairMode("single");
+  }, [allSymbols, pairMode]);
+
   // Run state
   const [running,  setRunning]  = useState(false);
   const [progress, setProgress] = useState<OptimProgress | null>(null);
-  const [result,   setResult]   = useState<OptimResult | null>(null);
+  /** Per-symbol results — populated for both modes (1 entry in single, N in all). */
+  const [perSymbolResults, setPerSymbolResults] = useState<Record<string, OptimResult>>({});
+  /** Which symbol's results to display in the leaderboard / cards. */
+  const [activeResultSym,  setActiveResultSym]  = useState<string>("");
+  /** Symbol currently being optimized (in all-pairs mode). */
+  const [currentSym, setCurrentSym] = useState<string>("");
+
   const [saveCand, setSaveCand] = useState<OptimCandidate | null>(null);
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const cancelRef = useRef({ cancelled: false });
+
+  /** Convenience — the displayed result. */
+  const result = activeResultSym ? perSymbolResults[activeResultSym] ?? null : null;
 
   // Run / Stop
   const handleStart = useCallback(async () => {
     if (bars.length < 50) return;
     setRunning(true);
-    setResult(null);
+    setPerSymbolResults({});
+    setActiveResultSym("");
     setProgress(null);
+    setCurrentSym("");
     cancelRef.current = { cancelled: false };
 
     const config: OptimConfig = {
@@ -501,10 +528,32 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
       endTime:     endDate   ? new Date(endDate + "T23:59:59").getTime() : undefined,
     };
 
-    const res = await runOptimization(bars, config, (p) => setProgress({ ...p }), cancelRef.current);
-    setResult(res);
+    if (pairMode === "single") {
+      // Single pair — filter bars and optimize once
+      const symBars = chosenSym ? bars.filter((b) => b.symbol === chosenSym) : bars;
+      setCurrentSym(chosenSym);
+      const res = await runOptimization(symBars, config, (p) => setProgress({ ...p }), cancelRef.current);
+      const sym = chosenSym || "all";
+      setPerSymbolResults({ [sym]: res });
+      setActiveResultSym(sym);
+    } else {
+      // All pairs — loop sequentially, store per-symbol results
+      const targets = allSymbols.length > 0 ? allSymbols : ["all"];
+      for (const sym of targets) {
+        if (cancelRef.current.cancelled) break;
+        setCurrentSym(sym);
+        setProgress(null);
+        const symBars = sym === "all" ? bars : bars.filter((b) => b.symbol === sym);
+        if (symBars.length < 50) continue; // not enough data for this symbol
+        const res = await runOptimization(symBars, config, (p) => setProgress({ ...p }), cancelRef.current);
+        setPerSymbolResults((prev) => ({ ...prev, [sym]: res }));
+        setActiveResultSym((cur) => cur || sym);
+      }
+      setCurrentSym("");
+    }
+
     setRunning(false);
-  }, [bars, metric, direction, minTrades, topFeatures, cooldown, flipOnSignal, startDate, endDate]);
+  }, [bars, allSymbols, pairMode, chosenSym, metric, direction, minTrades, topFeatures, cooldown, flipOnSignal, startDate, endDate]);
 
   const handleStop = () => { cancelRef.current.cancelled = true; };
 
@@ -521,10 +570,13 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
   };
 
   const top5       = result ? result.candidates.slice(0, 5) : [];
-  const topResults = progress?.topResults ?? [];
-  const symbolCount = useMemo(() => new Set(bars.map((b) => b.symbol)).size, [bars]);
-  // Phase 1 (FEATURES * 4) + phase 2 (worst case 2^topFeatures squared) + phase 3 + phase 4
-  const estCombos   = FEATURES.length * 4 + Math.pow(2, topFeatures + 1) + 5 * symbolCount + 10;
+  // While running, prefer live progress (current symbol). When done, show the active symbol's top 10.
+  const topResults = running && progress?.topResults?.length ? progress.topResults : result ? result.candidates.slice(0, 10) : [];
+  const symbolCount = allSymbols.length;
+  // Per-run cost: phase1 + phase2 + phase3 + phase4. Multiplied by N pairs in all-pairs mode.
+  const perRunCost  = FEATURES.length * 4 + Math.pow(2, topFeatures + 1) + 5 + 10;
+  const numRuns     = pairMode === "all" ? Math.max(1, symbolCount) : 1;
+  const estCombos   = perRunCost * numRuns;
 
   return (
     <div className="p-4 space-y-5 relative">
@@ -542,6 +594,49 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
             The optimizer searches feature × bucket combinations for both bullish and bearish edges, then combines them.
             Exits use signal flip (a bear signal closes a long, etc.). Tune cooldown / flip behaviour below — TP/SL/maxHold no longer exist.
           </p>
+
+          {/* Pair scope */}
+          {allSymbols.length > 1 && (
+            <div className="flex flex-wrap gap-4">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] text-binance-muted uppercase tracking-wider">Pair scope</label>
+                <div className="flex rounded overflow-hidden border border-binance-border">
+                  {(["single", "all"] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setPairMode(m)}
+                      className={`px-3 py-1.5 text-xs font-medium transition ${
+                        pairMode === m
+                          ? "bg-binance-yellow text-binance-dark"
+                          : "bg-binance-card text-binance-text hover:bg-binance-border"
+                      }`}
+                      title={m === "single"
+                        ? "Optimize a single chosen pair"
+                        : `Run full optimization on each loaded pair (${allSymbols.length} runs)`
+                      }
+                    >
+                      {m === "single" ? "Single pair" : `All pairs (${allSymbols.length})`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {pairMode === "single" && (
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11px] text-binance-muted uppercase tracking-wider">Pair</label>
+                  <select
+                    value={chosenSym}
+                    onChange={(e) => setChosenSym(e.target.value)}
+                    className="bg-binance-card border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none min-w-[120px]"
+                  >
+                    {allSymbols.map((sm) => (
+                      <option key={sm} value={sm}>{sm}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex flex-wrap gap-4">
             <div className="flex flex-col gap-1 min-w-[160px]">
@@ -673,13 +768,15 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
       )}
 
       {/* RUNNING / DONE UI */}
-      {(running || result) && (
+      {(running || Object.keys(perSymbolResults).length > 0) && (
         <>
           <div className="flex items-center gap-4 flex-wrap">
             {running ? (
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-binance-yellow animate-pulse" />
-                <span className="text-sm font-bold text-binance-yellow">Optimizing…</span>
+                <span className="text-sm font-bold text-binance-yellow">
+                  Optimizing{currentSym ? ` · ${currentSym}` : ""}…
+                </span>
               </div>
             ) : (
               <div className="flex items-center gap-2">
@@ -715,7 +812,7 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
                 </button>
               )}
               <button
-                onClick={() => { setResult(null); setProgress(null); setRunning(false); }}
+                onClick={() => { setPerSymbolResults({}); setActiveResultSym(""); setProgress(null); setRunning(false); setCurrentSym(""); }}
                 className="px-4 py-1.5 text-xs font-bold bg-binance-border text-binance-muted rounded-lg hover:text-white transition"
               >
                 ↩ Reconfigure
@@ -729,6 +826,43 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
               {progress.phases.map((ph, i) => (
                 <PhaseCard key={i} phase={ph} idx={i} />
               ))}
+            </div>
+          )}
+
+          {/* Per-symbol result switcher (multi pair mode) */}
+          {Object.keys(perSymbolResults).length > 1 && (
+            <div className="bg-binance-dark border border-binance-border rounded-lg px-3 py-2 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-binance-muted font-medium uppercase tracking-wider">Results for:</span>
+              {Object.keys(perSymbolResults).map((sym) => {
+                const r = perSymbolResults[sym];
+                const best = r.candidates[0];
+                const isActive = sym === activeResultSym;
+                return (
+                  <button
+                    key={sym}
+                    onClick={() => setActiveResultSym(sym)}
+                    className={`px-2.5 py-1 text-xs rounded font-mono font-medium transition flex items-center gap-1.5 ${
+                      isActive
+                        ? "bg-binance-yellow text-binance-dark"
+                        : "bg-binance-border text-binance-text hover:bg-[#414d5c]"
+                    }`}
+                    title={best ? best.label : "no result"}
+                  >
+                    <span className="font-semibold">{sym}</span>
+                    {best && (
+                      <span className={`text-[10px] ${isActive ? "" : best.score > 0 ? "text-binance-green" : "text-binance-red"}`}>
+                        {fmt(best.score, 2)}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {running && currentSym && !perSymbolResults[currentSym] && (
+                <span className="text-[10px] text-binance-yellow ml-2 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-binance-yellow animate-pulse" />
+                  optimizing {currentSym}…
+                </span>
+              )}
             </div>
           )}
 
@@ -848,8 +982,8 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
                 </div>
               </div>
 
-              {/* Per-pair heatmap */}
-              {result.symbols.length > 0 && (
+              {/* Per-pair heatmap (only meaningful when results pool many symbols) */}
+              {result.symbols.length > 1 && (
                 <div className="bg-binance-dark border border-binance-border rounded-xl overflow-hidden">
                   <div className="px-4 py-2.5 border-b border-binance-border">
                     <span className="text-xs font-bold text-white">🗺 Per-pair Performance Heatmap</span>
@@ -876,6 +1010,44 @@ export default function Optimizer({ bars, symbol = "", interval = "", onLoadToBu
                   </div>
                 </div>
               )}
+
+              {/* Trades chart for the best strategy of the active symbol */}
+              {(() => {
+                const best = top5[0];
+                const tradesForBest = best?.fullTrades ?? [];
+                // Pick klines for the active symbol (or any one symbol if only one)
+                const focalSymbol =
+                  activeResultSym && symbolKlines[activeResultSym]?.length ? activeResultSym :
+                  result.symbols.length === 1 ? result.symbols[0] :
+                  "";
+                const focalKlines = focalSymbol ? (symbolKlines[focalSymbol] ?? []) : [];
+
+                if (!best || tradesForBest.length === 0 || focalKlines.length === 0) return null;
+                const focalTrades = focalSymbol
+                  ? tradesForBest.filter((t) => t.symbol === focalSymbol)
+                  : tradesForBest;
+                if (focalTrades.length === 0) return null;
+
+                return (
+                  <div className="bg-binance-dark border border-binance-border rounded-xl overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-binance-border flex items-center gap-2">
+                      <span className="text-xs font-bold text-white">📈 Best Strategy · Trades Chart</span>
+                      <span className="text-[10px] text-binance-muted truncate" title={best.label}>· {best.label}</span>
+                      <span className="ml-auto text-[10px] text-binance-muted font-mono">
+                        {focalSymbol} · {focalTrades.length} trades
+                      </span>
+                    </div>
+                    <div className="px-4 py-3">
+                      <TradesChart
+                        klines={focalKlines}
+                        trades={focalTrades}
+                        symbol={focalSymbol}
+                        interval={interval}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
         </>

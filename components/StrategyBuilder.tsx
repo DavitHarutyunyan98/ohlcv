@@ -234,6 +234,8 @@ interface Props {
   bars:           EnrichedBar[];
   /** Raw klines for chart drawing — optional but enables Trades-chart tab. */
   klines?:        Kline[];
+  /** Map of symbol → klines, for per-pair chart support. */
+  symbolKlines?:  Record<string, Kline[]>;
   initialParams?: BacktestParams;
   symbol?:        string;
   interval?:      string;
@@ -242,7 +244,7 @@ interface Props {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StrategyBuilder({ bars, klines = [], initialParams, symbol = "", interval = "", onSaved }: Props) {
+export default function StrategyBuilder({ bars, klines = [], symbolKlines = {}, initialParams, symbol = "", interval = "", onSaved }: Props) {
   // ── Conditions (3 sets) ───────────────────────────────────────────────────
   const [bullConditions, setBullConditions] = useState<Condition[]>([
     { feature: "rsi14",        buckets: [1] },
@@ -284,6 +286,47 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
   const [showSave,   setShowSave]   = useState(false);
   const [savedToast, setSavedToast] = useState<string | null>(null);
 
+  // ── Scope: pair-mode + symbol-picker + date range ────────────────────────
+  const allSymbols = useMemo(() => {
+    const set = new Set(bars.map((b) => b.symbol));
+    return [...set];
+  }, [bars]);
+
+  const [pairMode,    setPairMode]    = useState<"single" | "all">(allSymbols.length > 1 ? "all" : "single");
+  const [chosenSym,   setChosenSym]   = useState<string>("");
+
+  // Default chosen symbol when symbols change
+  useEffect(() => {
+    if (allSymbols.length === 0) { setChosenSym(""); return; }
+    if (!chosenSym || !allSymbols.includes(chosenSym)) setChosenSym(allSymbols[0]);
+  }, [allSymbols, chosenSym]);
+
+  // Reset to single mode automatically when only 1 symbol exists
+  useEffect(() => {
+    if (allSymbols.length <= 1 && pairMode === "all") setPairMode("single");
+  }, [allSymbols, pairMode]);
+
+  const dataRange = useMemo(() => {
+    if (bars.length === 0) return { min: "", max: "" };
+    let lo = bars[0].openTime, hi = bars[0].openTime;
+    for (const b of bars) { if (b.openTime < lo) lo = b.openTime; if (b.openTime > hi) hi = b.openTime; }
+    return { min: new Date(lo).toISOString().slice(0, 10), max: new Date(hi).toISOString().slice(0, 10) };
+  }, [bars]);
+
+  const [startDate, setStartDate] = useState("");
+  const [endDate,   setEndDate]   = useState("");
+
+  // Bars actually used by the backtest — apply pair + date filters
+  const scopedBars = useMemo(() => {
+    const startMs = startDate ? new Date(startDate).getTime() : -Infinity;
+    const endMs   = endDate   ? new Date(endDate + "T23:59:59").getTime() : Infinity;
+    return bars.filter((b) => {
+      if (b.openTime < startMs || b.openTime > endMs) return false;
+      if (pairMode === "single" && chosenSym && b.symbol !== chosenSym) return false;
+      return true;
+    });
+  }, [bars, pairMode, chosenSym, startDate, endDate]);
+
   // ── Load preset ───────────────────────────────────────────────────────────
   const loadPreset = (idx: number) => {
     const p = PRESETS[idx].params;
@@ -299,12 +342,12 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
 
   // ── Run backtest ──────────────────────────────────────────────────────────
   const handleRun = useCallback(() => {
-    if (bars.length === 0) return;
+    if (scopedBars.length === 0) return;
     setRunning(true);
     setResult(null);
     setTimeout(() => {
       try {
-        const r = runBacktest(bars, {
+        const r = runBacktest(scopedBars, {
           bullConditions, bearConditions, exitMode, exitConditions,
           side, flipOnSignal, cooldown,
         });
@@ -314,7 +357,7 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
         setRunning(false);
       }
     }, 16);
-  }, [bars, bullConditions, bearConditions, exitMode, exitConditions, side, flipOnSignal, cooldown]);
+  }, [scopedBars, bullConditions, bearConditions, exitMode, exitConditions, side, flipOnSignal, cooldown]);
 
   // ── Save current strategy ─────────────────────────────────────────────────
   const handleSaveStrategy = useCallback((name: string, description: string) => {
@@ -381,13 +424,12 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
   // Filter trades + klines for the chart by chosen symbol
   const chartTrades = useMemo(() => trades.filter((t) => !chartSymbol || t.symbol === chartSymbol), [trades, chartSymbol]);
   const chartKlines = useMemo(() => {
-    // klines passed in are usually for one symbol (single mode). In multi mode
-    // they may be empty; the parent passes whichever klines are available.
-    if (klines.length === 0) return [];
-    if (!chartSymbol || !symbol || chartSymbol === symbol) return klines;
-    // chart is for a different symbol than the loaded klines — disable chart
+    // 1) Prefer the symbolKlines map (covers multi mode + arbitrary symbols).
+    if (chartSymbol && symbolKlines[chartSymbol]?.length) return symbolKlines[chartSymbol];
+    // 2) Fall back to the explicit `klines` prop if the focal symbol matches.
+    if (klines.length > 0 && (!chartSymbol || !symbol || chartSymbol === symbol)) return klines;
     return [];
-  }, [klines, chartSymbol, symbol]);
+  }, [klines, symbolKlines, chartSymbol, symbol]);
 
   const showFlipToggle = side === "both" && exitMode === "signal-flip";
 
@@ -409,6 +451,88 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
               {p.name}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Scope toolbar — pair mode + symbol picker + date range */}
+      <div className="px-4 py-3 border-b border-binance-border bg-binance-card flex flex-wrap items-end gap-4">
+        {/* Pair mode */}
+        {allSymbols.length > 1 && (
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-binance-muted uppercase tracking-wider">Backtest scope</label>
+            <div className="flex rounded overflow-hidden border border-binance-border">
+              {(["single", "all"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setPairMode(m)}
+                  className={`px-3 py-1.5 text-xs font-medium transition ${
+                    pairMode === m
+                      ? "bg-binance-yellow text-binance-dark"
+                      : "bg-binance-dark text-binance-text hover:bg-binance-border"
+                  }`}
+                >
+                  {m === "single" ? "Single pair" : `All pairs (${allSymbols.length})`}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Symbol picker */}
+        {pairMode === "single" && allSymbols.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-binance-muted uppercase tracking-wider">Pair</label>
+            <select
+              value={chosenSym}
+              onChange={(e) => setChosenSym(e.target.value)}
+              className="bg-binance-dark border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none focus:border-binance-yellow min-w-[120px]"
+            >
+              {allSymbols.map((sm) => (
+                <option key={sm} value={sm}>{sm}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Date range */}
+        <div className="flex flex-col gap-1">
+          <label className="text-[11px] text-binance-muted uppercase tracking-wider">Date range (optional)</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              min={dataRange.min || undefined}
+              max={endDate || dataRange.max || undefined}
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="bg-binance-dark border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none [color-scheme:dark]"
+            />
+            <span className="text-binance-muted text-xs">→</span>
+            <input
+              type="date"
+              min={startDate || dataRange.min || undefined}
+              max={dataRange.max || undefined}
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="bg-binance-dark border border-binance-border text-white text-xs rounded px-2 py-1.5 outline-none [color-scheme:dark]"
+            />
+            {(startDate || endDate) && (
+              <button
+                onClick={() => { setStartDate(""); setEndDate(""); }}
+                className="text-binance-muted hover:text-binance-red transition text-xs px-1"
+              >✕</button>
+            )}
+          </div>
+        </div>
+
+        {/* Status */}
+        <div className="ml-auto text-[11px] text-binance-muted">
+          <span className="text-white font-mono font-semibold">{scopedBars.length.toLocaleString()}</span> bars in scope
+          {pairMode === "single" && chosenSym && (
+            <span className="ml-1 text-white">· {chosenSym}</span>
+          )}
+          {(startDate || endDate) && (
+            <span className="ml-1 text-binance-yellow">📅 {startDate || dataRange.min} → {endDate || dataRange.max}</span>
+          )}
         </div>
       </div>
 
@@ -522,7 +646,7 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
           {/* Run button */}
           <button
             onClick={handleRun}
-            disabled={running || bars.length === 0}
+            disabled={running || scopedBars.length === 0}
             className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm font-bold rounded-lg transition flex items-center justify-center gap-2"
           >
             {running ? (
@@ -542,9 +666,11 @@ export default function StrategyBuilder({ bars, klines = [], initialParams, symb
             💾 Save as Strategy
           </button>
 
-          {bars.length === 0 && (
+          {bars.length === 0 ? (
             <p className="text-xs text-binance-red text-center">Fetch and Analyze data first</p>
-          )}
+          ) : scopedBars.length === 0 ? (
+            <p className="text-xs text-binance-red text-center">No bars in current scope — adjust pair / date filters</p>
+          ) : null}
         </div>
 
         {/* ═══ RIGHT — Results ════════════════════════════════════════════ */}
